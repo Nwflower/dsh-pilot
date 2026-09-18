@@ -1,22 +1,11 @@
 // index.mjs — dsh-pilot 宿主面（唯一依赖 DSH 宿主服务的文件）
 //
-// 职责（DESIGN §4/§5 P0）：
-//   1. 注册契约工具 pilot_dispatch：主代理递交契约（schema 刻意无 code 字段），
-//      插件组装子代理 prompt → subagents.start 派发 → 结构化回执 → 门禁 → verdict；
-//   2. 确定性门禁：shell 亲自执行 acceptance_cmd 取真实 exit code（不信回执自报）；
-//   3. 文件白名单守卫：tools.guard 按子代理 agent.id 匹配活动任务，write/edit/
-//      bash/pwsh 目标越出 allowed_files 即拒绝（bash/pwsh 尽力解析，fail-open）；
-//   4. diff 范围 + 回执真实性核验：git status --porcelain 任务前后快照差集，
-//      与回执 files_changed 交叉比对，虚报即 FAIL；
-//   5. 失败重试环：FAIL 且 retryable 时以确定性反馈（stderr 尾部 + 越界清单）
-//      重派新子代理，≤max_retries；耗尽 → ESCALATED 上交主代理/人类。
-//      （M1 用一次性 start 保 outputSchema 硬保证；steer 同一 continuable 子代理
-//       需 ContinuableStartSpec——其 request 剥除 outputSchema，列为 P1 升级。）
-//   6. 上下文零常驻（DESIGN §2.3）：persona 段一行（exposure:'silent' 时不注入），
-//      pilot-playbook skill 按需载入（silent 档 modelInvocable:false）。
-//
-// 身份：exec.agent.id（子代理守卫映射）/ agent.session.header.cwd（仓库根解析）。
-// 失败大声：契约非法、provider 缺失、门禁异常都以 verdict+reason 显式返回，绝不静默。
+// 职责：注册契约工具 pilot_dispatch（schema 刻意无 code 字段）→ subagents.start
+// 派发 → 结构化回执 → 门禁（shell 亲自执行 acceptance_cmd 取真实 exit code）→
+// porcelain/哈希快照差集核验（git 优先，非 git 回落白名单哈希）→ verdict；
+// tools.guard 按子代理 agent.id 拒白名单外写入（fail-open）；FAIL 重派新子代理
+// （≤max_retries，耗尽 ESCALATED）；persona 一行 + playbook skill 按需载入（§2.3）。
+// 失败大声：契约非法、provider 缺失、门禁异常都以 verdict+reason 显式返回。
 
 import { relative, isAbsolute } from 'node:path'
 import { existsSync } from 'node:fs'
@@ -179,7 +168,7 @@ function textOfOutput(output) {
     .join('\n')
 }
 
-function extractReceipt(result, hasOutputSchema) {
+function extractReceipt(result) {
   if (result && result.structured) {
     const v = validateReceipt(result.structured)
     if (v.ok) return v.receipt
@@ -317,12 +306,11 @@ async function dispatchOnce(ctx, cfg, contract, { repoRoot, parent, signal, feed
     ...(hasOutputSchema ? { outputSchema: RECEIPT_SCHEMA } : {}),
     persona: '你是执行手，只做契约内的事；完成后仅返回回执 JSON。',
   })
-  return { run, hasOutputSchema }
+  return run
 }
 
 async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
-  const tag = agentId(exec.agent)
-  if (!tag) return { verdict: 'FAIL', reason: '无法确定会话身份：缺少 agent', files_changed: [], attempts: 0 }
+  if (!agentId(exec.agent)) return { verdict: 'FAIL', reason: '无法确定会话身份：缺少 agent', files_changed: [], attempts: 0 }
 
   const cwd = exec.agent && exec.agent.session && exec.agent.session.header ? exec.agent.session.header.cwd : undefined
   const repoRoot = cwd ? await resolveRepoRoot(ctx, cwd) : null
@@ -367,8 +355,7 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
     attempts += 1
     let run
     try {
-      const started = await dispatchOnce(ctx, cfg, contract, { repoRoot, parent: exec.agent, signal: exec.signal, feedback, attempt: attempts })
-      run = started.run
+      run = await dispatchOnce(ctx, cfg, contract, { repoRoot, parent: exec.agent, signal: exec.signal, feedback, attempt: attempts })
     } catch (e) {
       last = { verdict: 'FAIL', retryable: false, reason: '派发子代理失败：' + (e && e.message ? e.message : String(e)) }
       break
@@ -393,7 +380,7 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
       }
     }
 
-    const receipt = extractReceipt(result, true)
+    const receipt = extractReceipt(result)
     let actualPaths
     if (useGit) {
       let afterText

@@ -7,7 +7,6 @@ import {
   validateContract,
   normalizeRelPath,
   pathAllowed,
-  parseNameOnly,
   parsePorcelain,
   porcelainPaths,
   checkScope,
@@ -107,11 +106,6 @@ test('pathAllowed：精确、目录前缀（带/不带斜杠）、白名单外�
 })
 
 // ---------- git 输出解析 ----------
-
-test('parseNameOnly：多行 + 空行 + CRLF', () => {
-  assert.deepEqual(parseNameOnly('a.ts\r\n\nb.ts\n'), ['a.ts', 'b.ts'])
-  assert.deepEqual(parseNameOnly(''), [])
-})
 
 test('parsePorcelain：M/??/A、重命名取新路径、CRLF、跳过空行', () => {
   const lines = parsePorcelain(' M src/a.ts\r\n?? new.txt\nA  added.md\nR  old.ts -> new.ts\n\n')

@@ -125,14 +125,6 @@ export function pathAllowed(relPath, allowedFiles) {
   })
 }
 
-export function parseNameOnly(output) {
-  if (typeof output !== 'string') return []
-  return output
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l !== '')
-}
-
 export function parsePorcelain(output) {
   if (typeof output !== 'string') return []
   const out = []
