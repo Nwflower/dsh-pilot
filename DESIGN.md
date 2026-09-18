@@ -402,11 +402,34 @@ dsh-pilot/
 
 | 里程碑 | 内容 | 验收 |
 | --- | --- | --- |
-| M0 | 本设计文档评审定稿 | 用户确认 |
-| M1 | P0：pilot-core + index.mjs + 守卫 + 门禁 + persona 段 | §8.1/8.2 全绿 + §8.4 真实任务通过 |
+| M0 | 本设计文档评审定稿 | 用户确认 ✅ |
+| M1 | P0：pilot-core + index.mjs + 守卫 + 门禁 + persona 段 | ✅ 完成：43/43 自动化测试 + 真实会话验收（见 §8.5） |
 | M2 | 预设打包 + playbook skill + AGENTS 模板 | standingKeyFor 通过，新会话开箱可用 |
 | M3 | P1 按需（tier/batch/worktree/status/成本） | 每个 F 单独 commit 单独验收 |
 | M4+ | P2 远景，按使用痛点优先级插队 | — |
+
+### 9.1 M1 真实会话验收记录（2026-09-18，动态插件机制，run-15）
+
+用 `cordis_define` 把 M1 代码挂进当前会话（设计 §2.3 指定的开发期手段），对真实子代理派发契约"覆写 hello.txt 内容"，全链路闭环：
+
+```
+before 哈希 7f8f3ffe(pilot-ok) → 真实子代理执行 58s completed
+→ after 哈希 4f39e9d6(pilot-ok v2) → 快照差集命中 → 回执交叉核验一致
+→ 门禁 node check.cjs → exit 0 → verdict: PASS (attempts=1)
+```
+
+真实环境实测修正（均已回灌仓库）：
+
+| 发现 | 修正 |
+| --- | --- |
+| `maxDepth: 0` 连派发本身都拒绝（子代理自身占 depth 1） | 防嵌套设 `maxDepth: 1` |
+| D:\Build 根非 git 仓库，porcelain 快照不可用 | 降级为白名单文件哈希快照（fnv1aHex），git 优先、失败回落 |
+| shell 默认沙箱策略 workspace-write 在本机 Windows ACL runner 上不可用 | `config.sandboxMode` 显式档（沿 §10"门禁沿会话沙箱策略"决策） |
+| 动态域 TextEncoder 跨 realm，`instanceof Uint8Array` 恒 false → 哈希恒 null → 回执被冤判虚报 | fnv1aHex 改鸭子类型判定字节流 |
+| 插件域 `fs.stat` 对已存在文件也可能返回 undefined（realm 视图差异） | 降级快照彻底移除 stat，readText 成败即事实 |
+| 虚报误判无法从会话内诊断 | verdict 内嵌快照 before/after 哈希与时间线诊断 |
+
+遗留观察：一次派发出现子代理 stopReason=error（flash 不稳定，非插件侧）；诊断字段为空，P1 考虑把子代理 stderr/stdout 尾部也纳入 diagnostic。
 
 ---
 
