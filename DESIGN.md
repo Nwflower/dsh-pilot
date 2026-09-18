@@ -269,7 +269,7 @@ pilot 对主会话上下文的占用必须趋近于零，三档曝光由插件 c
 | F3 | 确定性门禁：插件用 `shell` 亲自执行 `acceptance_cmd`，取真实 exit code | Host 插件 |
 | F4 | 白名单守卫：`tools.guard` 按 `exec.agent.id` 匹配活动任务，拒绝对白名单外路径的 write/edit；bash/pwsh 走尽力解析（fail-open，同 file-claim 边界） | Host 插件 |
 | F5 | diff 范围核验 + 回执真实性核验 | Host 插件 |
-| F6 | 失败重试环：stderr 尾部 steer 回同一 continuable 子代理，≤max_retries | Host 插件 |
+| F6 | 失败重试环：FAIL 且 retryable 时以确定性反馈（stderr 尾部 + 越界清单 + 虚报说明）**重派新子代理**，≤max_retries；耗尽 → ESCALATED（实现注记：M1 不用 `startContinuable` steer 同一子代理——实测 `ContinuableStartSpec.request` 会剥除 `outputSchema`，steer 模式拿不到结构化回执硬保证；同子代理 steer 列为 P1，届时回执走自由文本提取降级） | Host 插件 |
 | F7 | 极简 persona 段（`systemPrompt.section` 自注册，**一行 <80 token**）："改代码走 pilot_dispatch；复杂任务先载入 pilot-playbook"。`exposure: 'silent'` 时整段不注入（§2.3） | Host 插件 |
 | F8 | `pilot-playbook` Skill（`skills.register`，预设作用域层）：契约写作指南、tier 选择、失败处理。默认 `modelInvocable: true`（模型见一行摘要、按需载入正文）；`exposure: 'silent'` 时 `modelInvocable: false`，仅用户显式调用（§3.6） | 插件注册 / 预设目录 |
 | F9 | AGENTS.md 项目模板（预设 `templates/` 内，人工可选拷贝） | 预设 |
