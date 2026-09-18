@@ -77,7 +77,7 @@
 - **Skill 是成本阀门**：协作细节（契约怎么写、tier 怎么选、失败怎么处理）不进系统提示，主代理首次需要时 `skill('pilot-playbook')` 载入。
 - **AGENTS.md 模板是项目侧声明**：只写测试命令与目录边界（给人和主代理看），不写协作流程。
 
-### 2.3 上下文零常驻纪律（2026-09-18 用户拍板，对照 agent-teams 反面教材）
+### 2.3 上下文零常驻纪律
 
 pilot 对主会话上下文的占用必须趋近于零，三档曝光由插件 config `exposure` 控制：
 
@@ -97,7 +97,7 @@ pilot 对主会话上下文的占用必须趋近于零，三档曝光由插件 c
 
 ---
 
-## 3. 运行时基座调研结论（2026-09-05 实测当前 DSH 运行时）
+## 3. 运行时基座调研结论（实测自当前 DSH 运行时）
 
 **核心结论：不需要造 harness。** 官方子代理基座已原生提供本设计所需的全部关键能力，插件是"封装 + 裁决"，不是"重新发明"。
 
@@ -154,9 +154,9 @@ pilot 对主会话上下文的占用必须趋近于零，三档曝光由插件 c
 | 官方 `subagent` / `subagent_fork` / `workflow` 工具 | **共存不替代**。它们是通用委派原语；`pilot_dispatch` 是带契约与门禁的特化封装。主代理仍可对探索性任务用裸 `subagent` |
 | `dsh-file-claim`（用户已有插件） | **互补不重复**。file-claim 解决跨会话并行写的文件认领（advisory）；pilot 解决会话内主-子契约派发。同一工作区可共存（pilot 的守卫按 agent.id，file-claim 的守卫按会话认领，不冲突） |
 | `agentTeams` | P2 的可选任务矩阵后端，MVP 不依赖 |
-| 社区插件（agent-teams / ha-orchestrator / odai / sofagent 等） | 详见 §11。结论：无同构实现，但编排面被部分覆盖；允许 fork/抽取精华（§11.3），F15/F16/F19 优先评估集成而非自造 |
+| 社区插件（agent-teams / ha-orchestrator / odai / sofagent） | 详见 §11 |
 
-### 3.6 上下文预算控制（2026-09-18 补测，回应"工具/协议常驻侵占上下文"）
+### 3.6 上下文预算控制
 
 为 §2.3 零常驻纪律实测的官方机制，全部可用：
 
@@ -403,33 +403,16 @@ dsh-pilot/
 | 里程碑 | 内容 | 验收 |
 | --- | --- | --- |
 | M0 | 本设计文档评审定稿 | 用户确认 ✅ |
-| M1 | P0：pilot-core + index.mjs + 守卫 + 门禁 + persona 段 | ✅ 完成：43/43 自动化测试 + 真实会话验收（见 §8.5） |
+| M1 | P0：pilot-core + index.mjs + 守卫 + 门禁 + persona 段 | ✅ 完成：42/42 自动化测试 + 真实会话验收（见 §9.1） |
 | M2 | 预设打包 + playbook skill + AGENTS 模板 | standingKeyFor 通过，新会话开箱可用 |
 | M3 | P1 按需（tier/batch/worktree/status/成本） | 每个 F 单独 commit 单独验收 |
 | M4+ | P2 远景，按使用痛点优先级插队 | — |
 
-### 9.1 M1 真实会话验收记录（2026-09-18，动态插件机制，run-15）
+### 9.1 M1 真实会话验收记录（2026-09-18）
 
-用 `cordis_define` 把 M1 代码挂进当前会话（设计 §2.3 指定的开发期手段），对真实子代理派发契约"覆写 hello.txt 内容"，全链路闭环：
+经动态插件机制对真实子代理全链路派发验收：**PASS**（before/after 哈希快照差集命中、回执核验一致、门禁 exit 0、attempts=1）。实测发现的六项运行时事实（maxDepth 语义、非 git 降级、sandboxMode、跨 realm 哈希、stat 不可信、verdict 内嵌诊断）已回灌仓库与正文，明细见 git log。
 
-```
-before 哈希 7f8f3ffe(pilot-ok) → 真实子代理执行 58s completed
-→ after 哈希 4f39e9d6(pilot-ok v2) → 快照差集命中 → 回执交叉核验一致
-→ 门禁 node check.cjs → exit 0 → verdict: PASS (attempts=1)
-```
-
-真实环境实测修正（均已回灌仓库）：
-
-| 发现 | 修正 |
-| --- | --- |
-| `maxDepth: 0` 连派发本身都拒绝（子代理自身占 depth 1） | 防嵌套设 `maxDepth: 1` |
-| D:\Build 根非 git 仓库，porcelain 快照不可用 | 降级为白名单文件哈希快照（fnv1aHex），git 优先、失败回落 |
-| shell 默认沙箱策略 workspace-write 在本机 Windows ACL runner 上不可用 | `config.sandboxMode` 显式档（沿 §10"门禁沿会话沙箱策略"决策） |
-| 动态域 TextEncoder 跨 realm，`instanceof Uint8Array` 恒 false → 哈希恒 null → 回执被冤判虚报 | fnv1aHex 改鸭子类型判定字节流 |
-| 插件域 `fs.stat` 对已存在文件也可能返回 undefined（realm 视图差异） | 降级快照彻底移除 stat，readText 成败即事实 |
-| 虚报误判无法从会话内诊断 | verdict 内嵌快照 before/after 哈希与时间线诊断 |
-
-遗留观察：一次派发出现子代理 stopReason=error（flash 不稳定，非插件侧）；诊断字段为空，P1 考虑把子代理 stderr/stdout 尾部也纳入 diagnostic。
+遗留观察：子代理偶发 stopReason=error 且 diagnostic 为空（flash 侧不稳定）——P1 把子代理 stderr/stdout 尾部纳入 diagnostic（F17 数据源）。
 
 ---
 
@@ -448,7 +431,7 @@ before 哈希 7f8f3ffe(pilot-ok) → 真实子代理执行 58s completed
 
 ---
 
-## 11. 开源生态对照调研（2026-09-18）
+## 11. 开源生态对照调研
 
 调研问题：GitHub 上是否已有与本设计同构、可直接复用的实现？**结论：没有完全同构者。** "契约派发 + 插件亲自跑验收命令 + diff 白名单 + 回执交叉核验 + tier 成本分层"这个交集目前无人占据；但编排面已被部分覆盖，必须明确差异化边界与集成策略。
 
@@ -469,7 +452,7 @@ before 哈希 7f8f3ffe(pilot-ok) → 真实子代理执行 58s completed
 - [vibe-kanban](https://github.com/BloopAI/vibe-kanban) / [claude-squad](https://github.com/smtg-ai/claude-squad) / Fusion / agent-kanban：worktree 并行会话管理（看板/TUI），面向人驾多会话；Fusion 的 plan-review-execute 门禁是"阶段人工审批"，不是 exit-code 裁决。
 - [Arize 2026-08 分析](https://arize.com/blog/how-cheap-models-changed-multi-agent-economics/)与 COPE/Writer 论文：orchestrator-executor 经济学（贵模型规划、廉模型执行、编排能力有下限）已成行业共识——印证 §1 的问题定义，也意味着这个方向会有更多人做，差异化必须锁在"裁决可信度"上。
 
-### 11.3 复用与 fork 策略（2026-09-18 用户拍板：吸取精华、剔除糟粕，允许 fork 独立改动）
+### 11.3 复用与 fork 策略
 
 **代码级复用：从"零依赖不引入"升级为"选择性抽取"**（四个项目均 MIT，抽取须保留版权头）：
 
