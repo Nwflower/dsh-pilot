@@ -306,7 +306,8 @@ async function dispatchOnce(ctx, cfg, contract, { repoRoot, parent, signal, feed
     prompt: [{ type: 'text', text: prompt }],
     parent,
     signal,
-    maxDepth: 0,
+    // 深度语义：子代理自身占 depth 1（实测：0 会拒绝派发本身），1 = 允许子代、拒绝孙代
+    maxDepth: 1,
     ...(cfg.model ? { agentOptions: { model: cfg.model } } : {}),
     ...(hasOutputSchema ? { outputSchema: RECEIPT_SCHEMA } : {}),
     persona: '你是执行手，只做契约内的事；完成后仅返回回执 JSON。',

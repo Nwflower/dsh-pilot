@@ -112,7 +112,7 @@ pilot 对主会话上下文的占用必须趋近于零，三档曝光由插件 c
 | `outputSchema` | `ObjectJsonSchema` | **强制结构化回执**，物理消除散文汇报 |
 | `toolFilter` | `{allow?, deny?}` | **子代理工具收权**（按 tier 裁剪） |
 | `persona` | `string` | 子代理极简角色（"你是执行手，只做契约内的事"） |
-| `maxDepth` | `number` | 防止子代理再派子代理失控 |
+| `maxDepth` | `number` | 防止子代理再派子代理失控（实测语义：子代理自身占 depth 1，须设 1=允许子代、拒绝孙代；0 连派发本身都会被拒） |
 | `label` / `parent` / `signal` | — | 目录展示 / 父子关系 / 取消 |
 
 返回 `SubagentRun { id, localAgent, result: Promise<SubagentResult>, dispose() }`；`SubagentResult { output, structured, diagnostic, stopReason }` —— `structured` 即 outputSchema 校验后的 JSON。
