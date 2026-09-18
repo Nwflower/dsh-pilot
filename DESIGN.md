@@ -50,8 +50,8 @@
 | 形态 | 约束强度 | Token 成本 | 系统能力 | 迁移成本 | 结论 |
 | --- | --- | --- | --- | --- | --- |
 | AGENTS.md | 软（靠模型自觉） | 每会话全量载入 | 无（不能执行任何物理动作） | 每个仓库拷一份 | ❌ 只放项目侧最小声明 |
-| Skill | 软 | **按需加载**（目录摘要在场，正文调用才载入） | 无 | 随预设走 | ✅ 详细协作手册的载体 |
-| 预设 persona 提示段 | 软 | 常驻但可极简（<300 token） | 无 | 随预设走 | ✅ 角色声明 + 工具路由规则 |
+| Skill | 软 | **按需加载**（目录摘要在场，正文调用才载入；`invocation` 策略可控模型/用户可见性，见 §3.6） | 无 | 随预设走 | ✅ 详细协作手册的载体 |
+| 预设 persona 提示段 | 软 | 常驻但可极简（**目标一行 <80 token**，可配置为完全不注入） | 无 | 随预设走 | ✅ 一行指针：工具路由规则 |
 | 动态插件（cordis_define） | **硬** | 零（逻辑在代码里） | 有 | **进程本地，重启即失** | ⚠️ 只作开发期迭代手段 |
 | **仓库插件（npm 包）** | **硬** | 零 | 有（guard/事件/shell/子代理 API） | 一次安装全局生效 | ✅ 约束载体 |
 | **Agent 预设（preset）** | 组合容器 | 取决于组合内容 | 组合 | 一个目录，任何会话可选用 | ✅ **分发形态** |
@@ -77,7 +77,21 @@
 - **Skill 是成本阀门**：协作细节（契约怎么写、tier 怎么选、失败怎么处理）不进系统提示，主代理首次需要时 `skill('pilot-playbook')` 载入。
 - **AGENTS.md 模板是项目侧声明**：只写测试命令与目录边界（给人和主代理看），不写协作流程。
 
-### 2.3 为什么不是"动态插件"分发
+### 2.3 上下文零常驻纪律（2026-09-18 用户拍板，对照 agent-teams 反面教材）
+
+pilot 对主会话上下文的占用必须趋近于零，三档曝光由插件 config `exposure` 控制：
+
+| 档位 | persona 段 | skill 对模型 | 常驻成本 | 适用 |
+| --- | --- | --- | --- | --- |
+| `pointer`（默认） | 一行指针（<80 token）："改代码走 pilot_dispatch；复杂任务先载入 pilot-playbook" | 可见一行摘要，按需载入正文 | ~150 token | 希望主代理自发走契约流程 |
+| `silent` | **完全不注入** | `modelInvocable: false`，模型目录里不存在 | **0** | 用户自己掌控节奏，显式调用 `/skill pilot-playbook` 或直接点名 pilot_dispatch 才启用 |
+
+配套约束（防"agent-teams 式 14 工具常驻"）：
+
+- P0 只注册 **`pilot_dispatch` 一个工具**，description 控制在一两句话；契约字段语义、写作技巧全部放 skill body，不堆在工具 schema 里。P1 的 status/merge/batch 工具同理从简。
+- 不做"固定核心协议常驻系统提示"。协议的权威载体是 skill 正文与工具 schema 本身，模型需要时自取。
+
+### 2.4 为什么不是"动态插件"分发
 
 动态 Cordis 插件（`cordis_define`）是进程本地的临时扩展，重启即失，适合**开发期快速迭代**本插件的 guard/门禁逻辑；但用户的诉求是长期改善对话体验，分发形态必须是可以进 npm / 可以被预设引用的**仓库插件**（与 dsh-file-claim 同一形态：`index.mjs` host 入口 + `cordis.patch.yml` + `dsh plugin add`）。
 
@@ -140,7 +154,16 @@
 | 官方 `subagent` / `subagent_fork` / `workflow` 工具 | **共存不替代**。它们是通用委派原语；`pilot_dispatch` 是带契约与门禁的特化封装。主代理仍可对探索性任务用裸 `subagent` |
 | `dsh-file-claim`（用户已有插件） | **互补不重复**。file-claim 解决跨会话并行写的文件认领（advisory）；pilot 解决会话内主-子契约派发。同一工作区可共存（pilot 的守卫按 agent.id，file-claim 的守卫按会话认领，不冲突） |
 | `agentTeams` | P2 的可选任务矩阵后端，MVP 不依赖 |
-| 社区插件（agent-teams / ha-orchestrator / odai / sofagent 等） | 详见 §11。结论：无同构实现，但编排面被部分覆盖；F15/F16/F19 优先评估集成而非自造 |
+| 社区插件（agent-teams / ha-orchestrator / odai / sofagent 等） | 详见 §11。结论：无同构实现，但编排面被部分覆盖；允许 fork/抽取精华（§11.3），F15/F16/F19 优先评估集成而非自造 |
+
+### 3.6 上下文预算控制（2026-09-18 补测，回应"工具/协议常驻侵占上下文"）
+
+为 §2.3 零常驻纪律实测的官方机制，全部可用：
+
+- **`skills.register` 的 `SkillRegistration.invocation: {modelInvocable, userInvocable}`**：精确控制 skill 可见性。`modelInvocable: false` 时模型目录里根本没有它，仅用户可显式调用——"完全不入上下文"的官方机制。默认可见时模型也只见一行 `name + description` 摘要，正文由 `skill()` 工具按需载入（registry 自述 "loads full skill bodies on demand"）。
+- **`tools.presentAs('native' | 'ptc' | 'both')`**：scoped 声明，预设 standing composition 上调用即覆盖其下所有 agent；PTC 模式把工具以编程目录形式呈现而非全量 schema 常驻上下文。是全预设级的激进降本档位，**pilot 默认不动它**（影响面是所有工具，不只 pilot 的），列为预设可选优化。
+- **`tools.register` / `tools.restrict` 均支持 agent 作用域**：scoped 注册遮蔽全局、restrict 只遮蔽全局工具，可按 `agent.ctx` 逐代理裁剪工具面（与子代理 `toolFilter` 互补）。
+- 社区先例：[vibeinging/dsh-tool-search](https://github.com/vibeinging/dsh-tool-search)（按需工具发现 + 渐进 schema 披露）证明"工具不常驻、用时再取"在 DSH 上成立；反面教材是 dsh-agent-teams 的"固定核心协议 + 14 个业务工具常驻队长会话"（§11.1）。
 
 ---
 
@@ -247,8 +270,8 @@
 | F4 | 白名单守卫：`tools.guard` 按 `exec.agent.id` 匹配活动任务，拒绝对白名单外路径的 write/edit；bash/pwsh 走尽力解析（fail-open，同 file-claim 边界） | Host 插件 |
 | F5 | diff 范围核验 + 回执真实性核验 | Host 插件 |
 | F6 | 失败重试环：stderr 尾部 steer 回同一 continuable 子代理，≤max_retries | Host 插件 |
-| F7 | 极简 persona 提示段（插件经 `systemPrompt.section` 自注册，<300 token）：角色声明 + "改代码走 pilot_dispatch" + "只信 verdict" | Host 插件 |
-| F8 | `pilot-playbook` Skill（`skills.register`，预设作用域）：契约写作指南、tier 选择、失败处理 | 插件注册 / 预设目录 |
+| F7 | 极简 persona 段（`systemPrompt.section` 自注册，**一行 <80 token**）："改代码走 pilot_dispatch；复杂任务先载入 pilot-playbook"。`exposure: 'silent'` 时整段不注入（§2.3） | Host 插件 |
+| F8 | `pilot-playbook` Skill（`skills.register`，预设作用域层）：契约写作指南、tier 选择、失败处理。默认 `modelInvocable: true`（模型见一行摘要、按需载入正文）；`exposure: 'silent'` 时 `modelInvocable: false`，仅用户显式调用（§3.6） | 插件注册 / 预设目录 |
 | F9 | AGENTS.md 项目模板（预设 `templates/` 内，人工可选拷贝） | 预设 |
 
 ### 5.2 P1 — 效率与并行
@@ -298,7 +321,8 @@
 
 ### 6.3 成本控制
 
-- 主代理常驻增量：persona 段 <300 token；playbook 按需载入（Skill 目录只有摘要在场）。
+- 主代理常驻增量：persona 段一行 <80 token（`exposure: 'silent'` 时为 **0**）；playbook 按需载入（Skill 目录至多一行摘要在场，见 §2.3/§3.6）。
+- **工具面零常驻纪律**：P0 只注册 `pilot_dispatch` 一个工具，description 控制在一两句话；契约字段语义、写作技巧全部放 skill body，不堆在工具 schema 里——杜绝 agent-teams 式"14 工具 + 固定协议常驻队长会话"。
 - 子代理零协议学习：prompt = 契约本身，没有任何协作哲学灌输。
 - 主代理收到的只有 verdict JSON（目标 <200 token），子代理的中间过程、工具流水、思考全部留在子会话。
 - 门禁/核验/守卫全部是代码，零 LLM 调用。
@@ -396,6 +420,7 @@ dsh-pilot/
 | worktree 在非 git 工作区不可用 | 必然场景 | 自动降级：串行派发 + 守卫 + diff 快照比对（插件自行快照白名单文件哈希） |
 | 主代理"忍不住"直接写代码 | 软约束管不住概率模型 | 默认软引导（persona + 契约工具是最省力路径，模型自然倾向调用）；提供 `strictPlanner: true` 配置，开启后用会话级 guard 在主代理存在未完成契约时拒绝其 write/edit——默认**关**，避免误伤 tier=fast |
 | 门禁命令本身有害（acceptance_cmd 被滥用） | 命令由主代理生成、插件执行 | 沿用会话既有 approval/沙箱策略执行 shell；不在插件内额外发明权限体系 |
+| `exposure: 'silent'` 下主代理不会自发使用 pilot | 双模式的固有权衡 | 默认 `pointer`（一行指针）保自发可用；`silent` 供用户完全掌控启用时机，README 写明两档行为差异 |
 | 生态位被社区插件挤占 | agent-teams（1.7k★）编排面已很全 | 差异化定位不动摇：pilot 卖的是**确定性裁决**（exit code 门禁 + diff 交叉核验）与**成本分层**（tier + token 账单），不是编排；见 §11 |
 
 ---
@@ -421,11 +446,24 @@ dsh-pilot/
 - [vibe-kanban](https://github.com/BloopAI/vibe-kanban) / [claude-squad](https://github.com/smtg-ai/claude-squad) / Fusion / agent-kanban：worktree 并行会话管理（看板/TUI），面向人驾多会话；Fusion 的 plan-review-execute 门禁是"阶段人工审批"，不是 exit-code 裁决。
 - [Arize 2026-08 分析](https://arize.com/blog/how-cheap-models-changed-multi-agent-economics/)与 COPE/Writer 论文：orchestrator-executor 经济学（贵模型规划、廉模型执行、编排能力有下限）已成行业共识——印证 §1 的问题定义，也意味着这个方向会有更多人做，差异化必须锁在"裁决可信度"上。
 
-### 11.3 复用结论
+### 11.3 复用与 fork 策略（2026-09-18 用户拍板：吸取精华、剔除糟粕，允许 fork 独立改动）
 
-1. **代码级复用：基本为零。** 各项目都是各自宿主上的整体方案，且 pilot 坚持零依赖，不引入任何一方为依赖。
-2. **集成级复用**：F15（面板）/F16（DAG）/F19（长团队）优先评估接入 agent-teams；成本页评估 dsh-web-billing；审计增强挂 sofagent-audit。
-3. **定位一句话**（写进 README）："agent-teams 给你一支团队，dsh-pilot 给你一份合同"——pilot 的壁垒是确定性裁决（exit code + diff 交叉核验）与成本分层（tier + token 账单），这是现有项目都明确没有做的交集。
+**代码级复用：从"零依赖不引入"升级为"选择性抽取"**（四个项目均 MIT，抽取须保留版权头）：
+
+| 来源 | 处置 | 具体动作 |
+| --- | --- | --- |
+| dsh-ha-orchestrator | **抽取** | 模型回退链（角色级 fallbacks，启动失败/模型错误自动切换）与自定义子代理定义的持久化格式，补进 pilot 的 provider 降级链（§10 风险表的升级版）。模块边界清晰，按文件抄录 |
+| dsh-agent-teams | **不整体 fork** | TS 双端构建链（tsdown client bundle）、高频演进（188 commits）、邮箱/DAG/UI 与轻量定位不符——整体 fork 等于收养一列重火车。若做 F16/F19：① 洁净室重写 DAG 拓扑调度小块（注明灵感来源）；② 用户要完整团队面时直接安装它共存（F19 集成方案不变） |
+| odai | 参考思路 | hooks runtime 的零依赖多宿主生成思路可参考；宿主不同，无直接抽取价值 |
+| sofagent | 只集成不 fork | `acceptance_cmd` 里可挂 `sofagent-audit` 增强门禁 |
+
+**糟粕剔除清单**（对照社区反面教材逐条规避，均有官方机制兜底，见 §3.6）：
+
+1. ❌ agent-teams 的"固定核心协议常驻 + 14 个业务工具全量注入队长会话" → pilot 对策：§2.3 零常驻纪律，P0 只注册 `pilot_dispatch` 一个工具，协议正文进 skill 按需载入，skill 可见性用 `invocation` 策略控制，`exposure: 'silent'` 时上下文占用为 0。
+2. ❌ ha-orchestrator 的 supervisor LLM 评审判卷 → pilot 裁决永远是 exit code + diff 交叉核验（§4.3）。
+3. ❌ agent-teams 的 `.agent-teams/` 状态目录写工作区 → pilot 状态只在会话内存 / `${DSH_HOME}` 侧（§6.4）。
+
+**定位一句话**（写进 README）："agent-teams 给你一支团队，dsh-pilot 给你一份合同"——pilot 的壁垒是确定性裁决（exit code + diff 交叉核验）、成本分层（tier + token 账单）与零常驻纪律，这是现有项目都明确没有做的交集。
 
 ---
 
