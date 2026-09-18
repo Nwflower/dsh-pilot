@@ -5,12 +5,13 @@
 // 任何 DSH 依赖只允许出现在 index.mjs。
 
 // ---------- 回执 schema（派发给支持 outputSchema 的 provider） ----------
-
+// 注意：这是 subagents.start 的原始 JSON Schema（对象根子集，required 数组合法）；
+// 与 harness.defineTool 的 value schema DSL（属性级 required 布尔 + 显式 additionalProperties）是两套话语。
 export const RECEIPT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    status: { enum: ['completed', 'blocked'] },
+    status: { type: 'string', enum: ['completed', 'blocked'] },
     summary: { type: 'string' },
     files_changed: { type: 'array', items: { type: 'string' } },
     test_ran: { type: 'boolean' },
@@ -343,6 +344,31 @@ export function loadConfig(partial = {}) {
   return base
 }
 
+// ---------- 非 git 工作区降级（DESIGN §10：白名单文件哈希快照） ----------
+
+// FNV-1a 32 位：字节流 → 8 位 hex。降级快照用；碰撞概率对变更检测足够低，
+// 不追求密码学强度（这里只回答"文件内容变没变"）。
+export function fnv1aHex(bytes) {
+  if (!(bytes instanceof Uint8Array)) return null
+  let hash = 0x811c9dc5
+  for (let i = 0; i < bytes.length; i++) {
+    hash ^= bytes[i]
+    hash = (hash * 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
+}
+
+// 快照差集：before/after 均为 { rel: hash|null }（null = 文件不存在）。
+// 返回发生变化的 rel 数组（消失/出现/内容变化都算）。
+export function snapshotChanged(before, after) {
+  const out = []
+  const keys = new Set([...Object.keys(before || {}), ...Object.keys(after || {})])
+  for (const rel of keys) {
+    if ((before || {})[rel] !== (after || {})[rel]) out.push(rel)
+  }
+  return out.sort()
+}
+
 // ---------- shell 写目标提取（守卫用；尽力而为、fail-open） ----------
 
 const PWSH_WRITE_CMDLETS = new Set(['set-content', 'add-content', 'out-file', 'new-item', 'copy-item', 'move-item', 'remove-item', 'rename-item'])
@@ -389,8 +415,7 @@ function positionalTargets(cmd, positional) {
   return positional.length ? [positional[0]] : []
 }
 
-export function extractShellWriteTargets(command) {
-  const out = new Set()
+export function extractShellWriteTargets(command) {  const out = new Set()
   const tokens = splitCommandArgs(String(command))
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]

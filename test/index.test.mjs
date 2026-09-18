@@ -310,6 +310,61 @@ test('白名单守卫：子代理写白名单内放行、白名单外拒绝、�
   assert.equal(out.verdict, 'PASS')
 })
 
+test('非 git 工作区降级：哈希快照检测白名单文件变化，门禁照常执行', async () => {
+  const root = await tmpRoot()
+  const { ctx } = mockCtx(root)
+  let releaseResult
+  const sub = mockSubagents([
+    {
+      // 手动释放：before 快照完成后才解析 result 并翻转 written（防微任务提前写入）
+      result: new Promise((res) => {
+        releaseResult = () => res(okReceipt(['hello.txt']))
+      }).then((r) => {
+        written = true
+        return r
+      }),
+    },
+  ])
+  ctx.subagents = sub
+  // git 命令一律 exit 128（非仓库）；门禁 exit 0
+  const gitFails = {
+    resolve(r) {
+      return r
+    },
+    async run(spec) {
+      if (spec.command.startsWith('git ')) return { exitCode: 128, timedOut: false, stdout: { text: '' }, stderr: { text: 'fatal: not a git repository' } }
+      return { exitCode: 0, timedOut: false, stdout: { text: 'ok' }, stderr: { text: '' } }
+    },
+  }
+  ctx.shell = gitFails
+  // fs mock：hello.txt 任务前不存在，任务后内容为 pilot-ok\n
+  let written = false
+  ctx.fs = {
+    async resolve(p) {
+      return { path: p }
+    },
+    async stat(target) {
+      return written ? { path: target.path, size: 9 } : undefined
+    },
+    async readBytes(target) {
+      return written ? new TextEncoder().encode('pilot-ok\n') : new Uint8Array()
+    },
+  }
+  plugin.apply(ctx, {})
+  const pending = ctx.tools
+    .get('pilot_dispatch')
+    .execute(
+      { goal: '写冒烟文件', detail: '写 hello.txt 内容 pilot-ok', allowed_files: ['hello.txt'], acceptance_cmd: 'node check.cjs' },
+      execOf(agent('master', root)),
+    )
+  await new Promise((r) => setTimeout(r, 20)) // 等 before 快照落定
+  releaseResult()
+  const out = await pending
+  assert.equal(out.verdict, 'PASS', JSON.stringify(out))
+  assert.deepEqual(out.files_changed, ['hello.txt'])
+  assert.equal(out.gate.exit_code, 0)
+})
+
 test('renderVerdict：紧凑文本，PASS 不带处理提示，FAIL 带 error_tail 与处理指引', () => {
   const { ctx } = mockCtx()
   plugin.apply(ctx, {})

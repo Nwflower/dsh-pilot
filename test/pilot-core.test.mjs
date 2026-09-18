@@ -20,6 +20,8 @@ import {
   tailText,
   loadConfig,
   extractShellWriteTargets,
+  fnv1aHex,
+  snapshotChanged,
 } from '../pilot-core.mjs'
 
 // ---------- 契约校验 ----------
@@ -287,4 +289,22 @@ test('extractShellWriteTargets：引号字面量不误报、只读命令无目�
   assert.deepEqual(extractShellWriteTargets('dd if=a of=b.img'), ['b.img'])
   assert.deepEqual(extractShellWriteTargets('grep x; rm victim.ts'), ['victim.ts'])
   assert.deepEqual(extractShellWriteTargets('git commit -m "msg" -- a.ts'), [])
+})
+
+// ---------- 非 git 降级 ----------
+
+test('fnv1aHex：确定性、内容敏感、非字节流返回 null', () => {
+  const a = fnv1aHex(new TextEncoder().encode('pilot-ok\n'))
+  assert.equal(a, fnv1aHex(new TextEncoder().encode('pilot-ok\n')))
+  assert.notEqual(a, fnv1aHex(new TextEncoder().encode('pilot-no\n')))
+  assert.match(a, /^[0-9a-f]{8}$/)
+  assert.equal(fnv1aHex('nope'), null)
+})
+
+test('snapshotChanged：出现/消失/内容变化都算变化；无变化返回空', () => {
+  assert.deepEqual(snapshotChanged({ 'a.ts': 'aaaa' }, { 'a.ts': 'bbbb' }), ['a.ts'])
+  assert.deepEqual(snapshotChanged({ 'a.ts': 'aaaa' }, { 'a.ts': null }), ['a.ts'])
+  assert.deepEqual(snapshotChanged({ 'a.ts': null }, { 'a.ts': 'aaaa' }), ['a.ts'])
+  assert.deepEqual(snapshotChanged({ 'a.ts': 'aaaa', 'b.ts': 'bbbb' }, { 'a.ts': 'aaaa', 'b.ts': 'bbbb' }), [])
+  assert.deepEqual(snapshotChanged({}, { 'new.ts': 'cccc' }), ['new.ts'])
 })

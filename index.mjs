@@ -37,6 +37,8 @@ import {
   tailText,
   loadConfig,
   extractShellWriteTargets,
+  fnv1aHex,
+  snapshotChanged,
 } from './pilot-core.mjs'
 
 const WRITE_TOOLS = new Set(['write', 'edit', 'bash', 'pwsh'])
@@ -127,6 +129,40 @@ function changedPaths(beforeText, afterText) {
   const afterKeys = new Set(after.map(key))
   const changed = [...after.filter((l) => !beforeKeys.has(key(l))), ...before.filter((l) => !afterKeys.has(key(l)))]
   return porcelainPaths(changed)
+}
+
+// ---------- 非 git 工作区降级：白名单文件哈希快照（DESIGN §10） ----------
+// 快照 = { rel: hash|null }，null 表示文件不存在。目录条目（以 / 结尾）暂不展开，
+// 仅静态记录（M1 限制，P1 listDir 游走补齐）；目录下新建文件在降级模式检测不到。
+
+const FALLBACK_MAX_BYTES = 8 * 1024 * 1024
+
+function fileEntriesOf(allowedFiles) {
+  return allowedFiles.filter((p) => !p.endsWith('/'))
+}
+
+async function snapshotWhitelist(ctx, repoRoot, allowedFiles, signal) {
+  const fs = ctx.get('fs')
+  if (!fs || typeof fs.resolve !== 'function' || typeof fs.stat !== 'function' || typeof fs.readBytes !== 'function') {
+    throw new Error('fs 服务不可用：非 git 工作区无法做哈希快照')
+  }
+  const snapshot = {}
+  for (const rel of fileEntriesOf(allowedFiles)) {
+    try {
+      const target = await fs.resolve(repoRoot.replace(/[\\/]+$/, '') + '/' + rel, { cwd: repoRoot })
+      const info = await fs.stat(target, signal)
+      if (info === undefined) {
+        snapshot[rel] = null
+        continue
+      }
+      const bytes = await fs.readBytes(target, signal, FALLBACK_MAX_BYTES)
+      snapshot[rel] = fnv1aHex(bytes)
+    } catch (e) {
+      if (signal && signal.aborted) throw e
+      snapshot[rel] = null // 读不到（权限等）→ 视为不存在；写后出现即判变化
+    }
+  }
+  return snapshot
 }
 
 // ---------- 回执提取 ----------
@@ -295,11 +331,23 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
   const maxRetries =
     args && args.max_retries !== undefined && args.max_retries !== null ? contract.max_retries : cfg.maxRetries
 
-  let beforeText
+  // 核验基线：git 可用走 porcelain 差集；非 git 回落白名单哈希快照（§10 降级）
+  let useGit = true
+  let beforeText = ''
+  let beforeSnapshot = null
   try {
-    beforeText = (await runShell(ctx, repoRoot, 'git status --porcelain', exec.signal, cfg.gateTimeoutMs)).stdout
-  } catch (e) {
-    return { verdict: 'FAIL', reason: 'git 快照失败（需要 git 仓库）：' + (e && e.message ? e.message : String(e)), files_changed: [], attempts: 0 }
+    const g = await runShell(ctx, repoRoot, 'git status --porcelain', exec.signal, cfg.gateTimeoutMs)
+    if (g.exitCode !== 0) useGit = false
+    else beforeText = g.stdout
+  } catch {
+    useGit = false
+  }
+  if (!useGit) {
+    try {
+      beforeSnapshot = await snapshotWhitelist(ctx, repoRoot, contract.allowed_files, exec.signal)
+    } catch (e) {
+      return { verdict: 'FAIL', reason: '非 git 工作区且哈希快照不可用：' + (e && e.message ? e.message : String(e)), files_changed: [], attempts: 0 }
+    }
   }
 
   let attempts = 0
@@ -339,13 +387,24 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
     }
 
     const receipt = extractReceipt(result, true)
-    let afterText
-    try {
-      afterText = (await runShell(ctx, repoRoot, 'git status --porcelain', exec.signal, cfg.gateTimeoutMs)).stdout
-    } catch (e) {
-      afterText = beforeText
+    let actualPaths
+    if (useGit) {
+      let afterText
+      try {
+        afterText = (await runShell(ctx, repoRoot, 'git status --porcelain', exec.signal, cfg.gateTimeoutMs)).stdout
+      } catch {
+        afterText = beforeText
+      }
+      actualPaths = changedPaths(beforeText, afterText)
+    } else {
+      let afterSnapshot
+      try {
+        afterSnapshot = await snapshotWhitelist(ctx, repoRoot, contract.allowed_files, exec.signal)
+      } catch {
+        afterSnapshot = beforeSnapshot
+      }
+      actualPaths = snapshotChanged(beforeSnapshot, afterSnapshot)
     }
-    const actualPaths = changedPaths(beforeText, afterText)
     const scope = checkScope(actualPaths, contract.allowed_files)
     const truth = receipt ? checkReceipt(receipt, actualPaths) : { truthful: true, claimedNotChanged: [], changedNotClaimed: [] }
 
