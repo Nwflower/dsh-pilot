@@ -140,6 +140,7 @@
 | 官方 `subagent` / `subagent_fork` / `workflow` 工具 | **共存不替代**。它们是通用委派原语；`pilot_dispatch` 是带契约与门禁的特化封装。主代理仍可对探索性任务用裸 `subagent` |
 | `dsh-file-claim`（用户已有插件） | **互补不重复**。file-claim 解决跨会话并行写的文件认领（advisory）；pilot 解决会话内主-子契约派发。同一工作区可共存（pilot 的守卫按 agent.id，file-claim 的守卫按会话认领，不冲突） |
 | `agentTeams` | P2 的可选任务矩阵后端，MVP 不依赖 |
+| 社区插件（agent-teams / ha-orchestrator / odai / sofagent 等） | 详见 §11。结论：无同构实现，但编排面被部分覆盖；F15/F16/F19 优先评估集成而非自造 |
 
 ---
 
@@ -395,6 +396,36 @@ dsh-pilot/
 | worktree 在非 git 工作区不可用 | 必然场景 | 自动降级：串行派发 + 守卫 + diff 快照比对（插件自行快照白名单文件哈希） |
 | 主代理"忍不住"直接写代码 | 软约束管不住概率模型 | 默认软引导（persona + 契约工具是最省力路径，模型自然倾向调用）；提供 `strictPlanner: true` 配置，开启后用会话级 guard 在主代理存在未完成契约时拒绝其 write/edit——默认**关**，避免误伤 tier=fast |
 | 门禁命令本身有害（acceptance_cmd 被滥用） | 命令由主代理生成、插件执行 | 沿用会话既有 approval/沙箱策略执行 shell；不在插件内额外发明权限体系 |
+| 生态位被社区插件挤占 | agent-teams（1.7k★）编排面已很全 | 差异化定位不动摇：pilot 卖的是**确定性裁决**（exit code 门禁 + diff 交叉核验）与**成本分层**（tier + token 账单），不是编排；见 §11 |
+
+---
+
+## 11. 开源生态对照调研（2026-09-18）
+
+调研问题：GitHub 上是否已有与本设计同构、可直接复用的实现？**结论：没有完全同构者。** "契约派发 + 插件亲自跑验收命令 + diff 白名单 + 回执交叉核验 + tier 成本分层"这个交集目前无人占据；但编排面已被部分覆盖，必须明确差异化边界与集成策略。
+
+### 11.1 DSH 生态内（最直接相关）
+
+| 项目 | 它是什么 | 与本设计的重叠 | 关键差异 | 处置 |
+| --- | --- | --- | --- | --- |
+| [NanmiCoder/dsh-agent-teams](https://github.com/NanmiCoder/dsh-agent-teams)（1.7k★，v0.1.20，活跃） | 队长式多智能体**团队**：可续聊成员、带依赖任务 DAG、自动领取、成员邮箱、Web DAG 面板、默认"需求→实现→验证→审查→集成"质量门禁、逐成员 provider/model/reasoning_effort、memberMaxDepth=0 | 角色分工、任务矩阵、模型钉死、防嵌套外包、DAG（F16）、UI 面板（F15） | ① 其"验证/审查"是**派给子代理的 LLM 任务**，不是插件亲自跑 acceptance_cmd 取 exit code；② 官方自述"第一版范围控制是完成时审计，不是 host 写入拦截"（无 tools.guard 白名单）；③ 无 tier 分级——全员全流程，协议重（持久状态、邮箱、14 工具）；④ 无 token 成本账单 | **不重复造**。要"长期团队"用它；pilot 定位轻量契约裁决层，F19 保留集成入口 |
+| [Saktawdi/dsh-ha-orchestrator](https://github.com/Saktawdi/dsh-ha-orchestrator)（6★） | 模型 HA 熔断回退 + `orchestrate` 五模式（fanout/pipeline/supervisor/map-reduce/router）+ 自定义子代理（provider/model/effort、工具黑白名单、回退链、outputSchema、预算、resume） | 模型钉死、工具收权、结构化输出——**实证了 §3 基座结论在社区已被走通** | 验证靠 supervisor 子代理评审——正是本设计拒绝的"LLM 判卷"；无门禁、无白名单、无成本分层 | 借鉴其模型回退链（启动失败自动切备用模型）补 pilot 的 provider 降级链 |
+| [orziz/odai](https://github.com/orziz/odai) | 任务治理框架：控制器+角色能力路由（planner/researcher/frontend 映射 provider/model）+ 项目守卫 hooks（PreToolUse 保护只读路径、Stop 时跑声明的验收命令，零依赖 runtime 生成 6 宿主适配器） | **验收命令门禁、只读路径保护、角色路由、skill+插件+预设的分发形态**——独立印证了 §2 形态结论与 §6 门禁思路 | 项目级静态策略（`.odai/hooks.json`），不是逐契约派发；其模式是"子代理只读/返回 patch、controller 亲手写码"，与 pilot"子代理写码、主代理不写"恰好相反 | 互为印证，无代码复用；其 hooks runtime 的零依赖多宿主生成思路可参考 |
+| [KongFangXun/sofagent](https://github.com/KongFangXun/sofagent) | 提交时审计：24 条 git diff 确定性规则（密钥/越界/注入）、HMAC 防篡改链、快照回滚、DSH 插件族走 `tools/pre-execute` | diff 硬证据审计、越界编辑检测 | commit 时全仓审计，不是派发时按契约白名单 | 列为可选集成：验收命令里挂 `sofagent-audit` 增强门禁，不自建规则引擎 |
+| [dsh-web-billing](https://github.com/bpc-oss/dsh-web-billing)、[dsh-verification-receipt](https://github.com/030611/dsh-verification-receipt) | token 计费页 / 每轮工具结果 JSONL 摘要 | F14 成本计量的展示面 | — | F14 只做 verdict 附 `child.tokens`；完整成本页优先评估装 billing 而非自造 UI |
+
+### 11.2 跨生态（Claude Code 等，间接印证）
+
+- **Claude Code 官方**：subagent frontmatter 已原生支持 `isolation: worktree`（子代理自动进 worktree、扫尾回收、锁）与逐子代理选模型——worktree 隔离（F12）与模型分层是官方认定的主流方向；但无契约、无 exit-code 门禁、无回执核验。
+- [ruvnet/ruflo](https://github.com/ruvnet/ruflo)（claude-flow）：Claude Code/Codex 的 swarm meta-harness，重 prompt/hooks 编排，无确定性门禁。
+- [vibe-kanban](https://github.com/BloopAI/vibe-kanban) / [claude-squad](https://github.com/smtg-ai/claude-squad) / Fusion / agent-kanban：worktree 并行会话管理（看板/TUI），面向人驾多会话；Fusion 的 plan-review-execute 门禁是"阶段人工审批"，不是 exit-code 裁决。
+- [Arize 2026-08 分析](https://arize.com/blog/how-cheap-models-changed-multi-agent-economics/)与 COPE/Writer 论文：orchestrator-executor 经济学（贵模型规划、廉模型执行、编排能力有下限）已成行业共识——印证 §1 的问题定义，也意味着这个方向会有更多人做，差异化必须锁在"裁决可信度"上。
+
+### 11.3 复用结论
+
+1. **代码级复用：基本为零。** 各项目都是各自宿主上的整体方案，且 pilot 坚持零依赖，不引入任何一方为依赖。
+2. **集成级复用**：F15（面板）/F16（DAG）/F19（长团队）优先评估接入 agent-teams；成本页评估 dsh-web-billing；审计增强挂 sofagent-audit。
+3. **定位一句话**（写进 README）："agent-teams 给你一支团队，dsh-pilot 给你一份合同"——pilot 的壁垒是确定性裁决（exit code + diff 交叉核验）与成本分层（tier + token 账单），这是现有项目都明确没有做的交集。
 
 ---
 
