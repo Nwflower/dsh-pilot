@@ -343,11 +343,9 @@ test('非 git 工作区降级：哈希快照检测白名单文件变化，门禁
     async resolve(p) {
       return { path: p }
     },
-    async stat(target) {
-      return written ? { path: target.path, size: 9 } : undefined
-    },
     async readText(target) {
-      return written ? 'pilot-ok\n' : ''
+      if (!written) throw new Error('ENOENT: ' + target.path)
+      return 'pilot-ok\n'
     },
   }
   plugin.apply(ctx, {})

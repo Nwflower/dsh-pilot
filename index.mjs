@@ -138,14 +138,13 @@ function changedPaths(beforeText, afterText) {
 // 目录条目（以 / 结尾）暂不展开，仅静态记录（M1 限制，P1 listDir 游走补齐）；
 // 目录下新建文件在降级模式检测不到。
 
-// 单条目快照：读文本（语义清晰、跨实现稳定）→ UTF-8 字节 → FNV-1a hex。
-// 绝对路径不需要 cwd——实测把文件路径当 cwd 传给 resolve 会抛错（曾被逐条 catch 吞成 null）。
-async function snapshotEntry(fs, absPath, signal) {
-  const target = await fs.resolve(absPath)
-  const info = await fs.stat(target, signal)
-  if (info === undefined) return null
+// 单条目快照：readText 成功 → 内容哈希；抛错 → 视为不存在。
+// 不用 stat——实测插件域里 stat 对已存在文件也可能返回 undefined（realm 视图差异），
+// 而门禁 shell 与子代理写入都能看到同一文件；内容哈希才是降级快照唯一需要的事实。
+async function snapshotEntry(fs, rel, repoRoot, signal) {
+  const target = await fs.resolve(rel, { cwd: repoRoot })
   const text = await fs.readText(target, signal)
-  return fnv1aHex(new TextEncoder().encode(text))
+  return fnv1aHex(new TextEncoder().encode(String(text)))
 }
 
 function fileEntriesOf(allowedFiles) {
@@ -154,14 +153,13 @@ function fileEntriesOf(allowedFiles) {
 
 async function snapshotWhitelist(ctx, repoRoot, allowedFiles, signal) {
   const fs = ctx.get('fs')
-  if (!fs || typeof fs.resolve !== 'function' || typeof fs.stat !== 'function' || typeof fs.readText !== 'function') {
+  if (!fs || typeof fs.resolve !== 'function' || typeof fs.readText !== 'function') {
     throw new Error('fs 服务不可用：非 git 工作区无法做哈希快照')
   }
   const snapshot = {}
-  const root = repoRoot.replace(/[\\/]+$/, '')
   for (const rel of fileEntriesOf(allowedFiles)) {
     try {
-      snapshot[rel] = await snapshotEntry(fs, root + '/' + rel, signal)
+      snapshot[rel] = await snapshotEntry(fs, rel, repoRoot, signal)
     } catch (e) {
       if (signal && signal.aborted) throw e
       // 静默吞掉会让 after 快照误判"无变化"→ 回执被冤判虚报；大声记录
