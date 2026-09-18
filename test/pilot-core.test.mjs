@@ -1,0 +1,290 @@
+// test/pilot-core.test.mjs — pilot-core.mjs 纯函数单测（零依赖、零 IO）
+
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  RECEIPT_SCHEMA,
+  validateContract,
+  normalizeRelPath,
+  pathAllowed,
+  parseNameOnly,
+  parsePorcelain,
+  porcelainPaths,
+  checkScope,
+  checkReceipt,
+  validateReceipt,
+  extractReceiptJson,
+  determineVerdict,
+  escalate,
+  buildChildPrompt,
+  tailText,
+  loadConfig,
+  extractShellWriteTargets,
+} from '../pilot-core.mjs'
+
+// ---------- 契约校验 ----------
+
+test('validateContract：最小合法契约通过并填充缺省', () => {
+  const v = validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], acceptance_cmd: 'pnpm test' })
+  assert.equal(v.ok, true)
+  assert.equal(v.contract.tier, 'standard')
+  assert.equal(v.contract.max_retries, 2)
+  assert.deepEqual(v.contract.context, [])
+  assert.equal(v.contract.acceptance_cmd, 'pnpm test')
+})
+
+test('validateContract：goal 超长被拒', () => {
+  const v = validateContract({ goal: 'x'.repeat(141), detail: 'd', allowed_files: ['a.ts'] })
+  assert.equal(v.ok, false)
+  assert.ok(v.errors.some((e) => e.includes('goal')))
+})
+
+test('validateContract：缺 allowed_files 被拒；空数组也被拒', () => {
+  assert.equal(validateContract({ goal: 'g', detail: 'd' }).ok, false)
+  assert.equal(validateContract({ goal: 'g', detail: 'd', allowed_files: [] }).ok, false)
+})
+
+test('validateContract：含 code 字段被拒且错误信息点名 code（递不了代码的硬保证）', () => {
+  const v = validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], code: 'const x = 1' })
+  assert.equal(v.ok, false)
+  assert.ok(v.errors.some((e) => e.includes('code')))
+})
+
+test('validateContract：tier=standard 缺 acceptance_cmd 被拒；fast 无验收命令通过', () => {
+  const a = validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], tier: 'standard' })
+  assert.equal(a.ok, false)
+  assert.ok(a.errors.some((e) => e.includes('acceptance_cmd')))
+  const b = validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], tier: 'fast' })
+  assert.equal(b.ok, true)
+})
+
+test('validateContract：max_retries 越界与非整数被拒', () => {
+  assert.equal(validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], max_retries: 6 }).ok, false)
+  assert.equal(validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], max_retries: 1.5 }).ok, false)
+  assert.equal(validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], max_retries: -1 }).ok, false)
+})
+
+test('validateContract：未知键 foo 被拒', () => {
+  const v = validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], foo: 1 })
+  assert.equal(v.ok, false)
+  assert.ok(v.errors.some((e) => e.includes('foo')))
+})
+
+test('validateContract：context 项缺 path 被拒；note 空串视为无', () => {
+  const a = validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], context: [{ note: 'n' }] })
+  assert.equal(a.ok, false)
+  const b = validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], acceptance_cmd: 't', context: [{ path: 'a.ts', note: '' }] })
+  assert.equal(b.ok, true)
+  assert.deepEqual(b.contract.context, [{ path: 'a.ts' }])
+})
+
+test('validateContract：非法输入整体被拒', () => {
+  assert.equal(validateContract(null).ok, false)
+  assert.equal(validateContract('x').ok, false)
+  assert.equal(validateContract([1]).ok, false)
+})
+
+// ---------- 路径 ----------
+
+test('normalizeRelPath：反斜杠、连续斜杠、./ 前缀、尾斜杠归一', () => {
+  assert.equal(normalizeRelPath('.\\a\\\\b/'), 'a/b')
+  assert.equal(normalizeRelPath('./x'), 'x')
+  assert.equal(normalizeRelPath('a//b'), 'a/b')
+  assert.equal(normalizeRelPath(42), '')
+})
+
+test('pathAllowed：精确、目录前缀（带/不带斜杠）、白名单外、空串', () => {
+  const wl = ['src/auth.ts', 'src/lib/', 'tests']
+  assert.equal(pathAllowed('src/auth.ts', wl), true)
+  assert.equal(pathAllowed('src/lib/util.ts', wl), true)
+  assert.equal(pathAllowed('src/lib/util.ts'.replace('util', 'deep/nested'), wl), true)
+  assert.equal(pathAllowed('tests/a.test.ts', wl), true)
+  assert.equal(pathAllowed('src/authz.ts', wl), false)
+  assert.equal(pathAllowed('', wl), false)
+  assert.equal(pathAllowed('src/auth.ts', []), false)
+})
+
+// ---------- git 输出解析 ----------
+
+test('parseNameOnly：多行 + 空行 + CRLF', () => {
+  assert.deepEqual(parseNameOnly('a.ts\r\n\nb.ts\n'), ['a.ts', 'b.ts'])
+  assert.deepEqual(parseNameOnly(''), [])
+})
+
+test('parsePorcelain：M/??/A、重命名取新路径、CRLF、跳过空行', () => {
+  const lines = parsePorcelain(' M src/a.ts\r\n?? new.txt\nA  added.md\nR  old.ts -> new.ts\n\n')
+  assert.deepEqual(lines, [
+    { status: 'M', path: 'src/a.ts' },
+    { status: '??', path: 'new.txt' },
+    { status: 'A', path: 'added.md' },
+    { status: 'R', path: 'new.ts' },
+  ])
+  assert.deepEqual(porcelainPaths([...lines, ...lines]), ['src/a.ts', 'new.txt', 'added.md', 'new.ts'])
+})
+
+// ---------- 范围与回执核验 ----------
+
+test('checkScope：越界进 violations；目录前缀覆盖不算越界', () => {
+  const a = checkScope(['src/auth.ts', 'src/evil.ts'], ['src/auth.ts'])
+  assert.equal(a.ok, false)
+  assert.deepEqual(a.violations, ['src/evil.ts'])
+  assert.equal(checkScope(['src/lib/x.ts'], ['src/lib/']).ok, true)
+  assert.equal(checkScope([], ['a']).ok, true)
+})
+
+test('checkReceipt：双向一致 truthful；虚报与漏报分列', () => {
+  const t = checkReceipt({ files_changed: ['src/a.ts'] }, ['src/a.ts'])
+  assert.equal(t.truthful, true)
+  const over = checkReceipt({ files_changed: ['src/ghost.ts', 'src/a.ts'] }, ['src/a.ts'])
+  assert.equal(over.truthful, false)
+  assert.deepEqual(over.claimedNotChanged, ['src/ghost.ts'])
+  const under = checkReceipt({ files_changed: [] }, ['src/a.ts'])
+  assert.deepEqual(under.changedNotClaimed, ['src/a.ts'])
+})
+
+// ---------- 回执校验与提取 ----------
+
+test('validateReceipt：合法、缺必填、多余字段、类型错误', () => {
+  const ok = validateReceipt({ status: 'completed', files_changed: ['a'], test_ran: true })
+  assert.equal(ok.ok, true)
+  assert.equal(validateReceipt({ status: 'completed', files_changed: ['a'] }).ok, false) // 缺 test_ran
+  assert.equal(validateReceipt({ status: 'completed', files_changed: ['a'], test_ran: true, code: 'x' }).ok, false)
+  assert.equal(validateReceipt({ status: 'nope', files_changed: ['a'], test_ran: true }).ok, false)
+  assert.equal(validateReceipt({ status: 'completed', files_changed: [1], test_ran: true }).ok, false)
+  assert.equal(validateReceipt(null).ok, false)
+})
+
+test('extractReceiptJson：散文包裹、嵌套花括号、纯散文、多 JSON 取第一个合法的', () => {
+  const r1 = extractReceiptJson('执行完成。\n{"status":"completed","summary":"好","files_changed":["a.ts"],"test_ran":true}\n以上。')
+  assert.equal(r1.summary, '好')
+
+  const nested = '前置 {"a":{"b":"{不含回执}"},"c":1} 尾随 {"status":"completed","files_changed":["b.ts"],"test_ran":false}'
+  assert.equal(extractReceiptJson(nested).files_changed[0], 'b.ts')
+
+  assert.equal(extractReceiptJson('没有任何 JSON'), null)
+  assert.equal(extractReceiptJson('{"status":"completed"}'), null) // JSON 但不是回执
+})
+
+// ---------- 裁决状态机 ----------
+
+test('determineVerdict：全绿 PASS', () => {
+  const v = determineVerdict({
+    childStopReason: 'completed',
+    receipt: { status: 'completed', files_changed: [], test_ran: true },
+    scope: { ok: true, violations: [] },
+    truth: { truthful: true, claimedNotChanged: [], changedNotClaimed: [] },
+    gate: { cmd: 't', exitCode: 0, timedOut: false },
+  })
+  assert.deepEqual(v, { verdict: 'PASS', retryable: false })
+})
+
+test('determineVerdict：stopReason 分支', () => {
+  const base = { receipt: { status: 'completed', files_changed: [], test_ran: true }, scope: { ok: true, violations: [] }, truth: { truthful: true, claimedNotChanged: [], changedNotClaimed: [] } }
+  assert.equal(determineVerdict({ ...base, childStopReason: 'aborted' }).verdict, 'BLOCKED')
+  assert.equal(determineVerdict({ ...base, childStopReason: 'refusal' }).verdict, 'BLOCKED')
+  const err = determineVerdict({ ...base, childStopReason: 'error' })
+  assert.equal(err.verdict, 'FAIL')
+  assert.equal(err.retryable, true)
+  const mt = determineVerdict({ ...base, childStopReason: 'max-tokens' })
+  assert.equal(mt.verdict, 'FAIL')
+  assert.equal(mt.retryable, true)
+  assert.equal(determineVerdict({ ...base, childStopReason: '???' }).retryable, false)
+})
+
+test('determineVerdict：无回执 → FAIL 可重试；status=blocked → BLOCKED', () => {
+  const r = determineVerdict({ childStopReason: 'completed', receipt: null })
+  assert.equal(r.verdict, 'FAIL')
+  assert.equal(r.retryable, true)
+  const b = determineVerdict({ childStopReason: 'completed', receipt: { status: 'blocked', files_changed: [], test_ran: false, summary: '缺上下文' } })
+  assert.equal(b.verdict, 'BLOCKED')
+  assert.ok(b.reason.includes('缺上下文'))
+})
+
+test('determineVerdict：越界、虚报、门禁失败、派发失败', () => {
+  const base = { childStopReason: 'completed', receipt: { status: 'completed', files_changed: [], test_ran: true } }
+  const s = determineVerdict({ ...base, scope: { ok: false, violations: ['x.ts'] }, truth: { truthful: true, claimedNotChanged: [], changedNotClaimed: [] } })
+  assert.ok(s.reason.includes('越界修改'))
+  const t = determineVerdict({ ...base, scope: { ok: true, violations: [] }, truth: { truthful: false, claimedNotChanged: ['g'], changedNotClaimed: ['h'] } })
+  assert.ok(t.reason.includes('回执虚报'))
+  const g = determineVerdict({ ...base, scope: { ok: true, violations: [] }, truth: { truthful: true, claimedNotChanged: [], changedNotClaimed: [] }, gate: { cmd: 't', exitCode: 2, timedOut: false } })
+  assert.ok(g.reason.includes('exit 2'))
+  const g0 = determineVerdict({ ...base, scope: { ok: true, violations: [] }, truth: { truthful: true, claimedNotChanged: [], changedNotClaimed: [] }, gate: { cmd: 't', exitCode: 0, timedOut: false } })
+  assert.equal(g0.verdict, 'PASS')
+  const d = determineVerdict({ dispatchError: 'provider 不存在' })
+  assert.equal(d.verdict, 'FAIL')
+  assert.equal(d.retryable, false)
+})
+
+test('escalate：FAIL+retryable → ESCALATED；BLOCKED/PASS 原样', () => {
+  assert.equal(escalate({ verdict: 'FAIL', retryable: true, reason: 'r' }).verdict, 'ESCALATED')
+  assert.equal(escalate({ verdict: 'BLOCKED', retryable: false }).verdict, 'BLOCKED')
+  assert.equal(escalate({ verdict: 'PASS', retryable: false }).verdict, 'PASS')
+})
+
+// ---------- prompt 组装 ----------
+
+test('buildChildPrompt：含契约要素与回执格式；fast 档禁新增测试；feedback 节按需出现', () => {
+  const std = buildChildPrompt({
+    goal: '实现 sign',
+    detail: '签名函数',
+    context: [{ path: 'src/auth.ts', note: 'sign(uid): string' }],
+    allowed_files: ['src/auth.ts', 'tests/'],
+    acceptance_cmd: 'pnpm vitest run',
+  })
+  assert.ok(std.includes('实现 sign'))
+  assert.ok(std.includes('签名函数'))
+  assert.ok(std.includes('src/auth.ts: sign(uid): string'))
+  assert.ok(std.includes('- tests/'))
+  assert.ok(std.includes('pnpm vitest run'))
+  assert.ok(std.includes('files_changed'))
+  assert.ok(!std.includes('上一轮失败反馈'))
+
+  const fast = buildChildPrompt({ goal: 'g', detail: 'd', context: [], allowed_files: ['a.md'] })
+  assert.ok(fast.includes('禁止新增测试'))
+  assert.ok(!fast.includes('## 相关上下文'))
+
+  const fb = buildChildPrompt({ goal: 'g', detail: 'd', context: [], allowed_files: ['a'] }, '门禁失败：exit 1')
+  assert.ok(fb.includes('上一轮失败反馈'))
+  assert.ok(fb.includes('exit 1'))
+})
+
+// ---------- 杂项 ----------
+
+test('tailText：截头留尾；缺省 2000；非字符串空串', () => {
+  assert.equal(tailText('abcdef', 3), 'def')
+  assert.equal(tailText('ab', 3), 'ab')
+  assert.equal(tailText('x'.repeat(2500)).length, 2000)
+  assert.equal(tailText(null), '')
+})
+
+test('loadConfig：缺省、undefined 不覆盖、多余键剥除、不改入参', () => {
+  const partial = { provider: 'fork', model: undefined, junk: 1 }
+  const cfg = loadConfig(partial)
+  assert.equal(cfg.provider, 'fork')
+  assert.equal(cfg.model, undefined)
+  assert.equal(cfg.exposure, 'pointer')
+  assert.equal(cfg.junk, undefined)
+  assert.deepEqual(partial, { provider: 'fork', model: undefined, junk: 1 })
+  assert.equal(loadConfig().maxRetries, 2)
+})
+
+// ---------- shell 写目标提取 ----------
+
+test('extractShellWriteTargets：重定向与追加重定向', () => {
+  assert.deepEqual(extractShellWriteTargets('echo x > out.txt'), ['out.txt'])
+  assert.ok(extractShellWriteTargets('foo 2>> log.txt').includes('log.txt'))
+})
+
+test('extractShellWriteTargets：pwsh 写命令与位置参数规则', () => {
+  assert.deepEqual(extractShellWriteTargets('Set-Content -Path a.txt -Value x'), ['a.txt'])
+  assert.deepEqual(extractShellWriteTargets('Copy-Item src.ts dst.ts'), ['dst.ts'])
+  assert.deepEqual(extractShellWriteTargets('rm a.ts b.ts'), ['a.ts', 'b.ts'])
+})
+
+test('extractShellWriteTargets：引号字面量不误报、只读命令无目标、dd of=、命令边界', () => {
+  assert.deepEqual(extractShellWriteTargets('echo "not-a-path" > f.txt'), ['f.txt'])
+  assert.deepEqual(extractShellWriteTargets('cat note.txt'), [])
+  assert.deepEqual(extractShellWriteTargets('dd if=a of=b.img'), ['b.img'])
+  assert.deepEqual(extractShellWriteTargets('grep x; rm victim.ts'), ['victim.ts'])
+  assert.deepEqual(extractShellWriteTargets('git commit -m "msg" -- a.ts'), [])
+})
