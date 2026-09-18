@@ -168,6 +168,11 @@ test('persona 指针与 playbook skill 注入；exposure=silent 时 persona 不�
   assert.equal(a.skills[0].invocation.modelInvocable, true)
   assert.equal(a.skills[0].invocation.userInvocable, true)
   assert.ok(a.skills[0].content.includes('verdict'))
+  // 手册必须是实content：空壳注册（实测出现过"只有标题+资源提示行"）在这里直接红
+  assert.ok(a.skills[0].content.length > 1500, 'playbook 内容过短，疑似空壳')
+  for (const section of ['门禁设计模式', 'Select-String', 'SetNamedSecurityInfoW', 'error_class', 'workspace_delta', 'baseline_gate']) {
+    assert.ok(a.skills[0].content.includes(section), 'playbook 缺少实战小节: ' + section)
+  }
 
   const b = mockCtx()
   plugin.apply(b.ctx, { exposure: 'silent' })

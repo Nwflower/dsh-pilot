@@ -43,7 +43,7 @@ const PLAYBOOK = `# pilot-playbook — 契约写作与裁决处理手册
 - tier=standard（跨模块、核心状态、接口变更）：必须契约派发，主代理不写业务代码。
 - 海量微需求：先聚合成一个 chore 契约（一份白名单、一条零回归门禁），一次派发。
 
-## 契约四要素写法
+## 契约五要素写法
 1. goal：一句话（≤140 字），写"做什么"，不写"怎么做"。
 2. detail：接口签名、边界条件、禁止事项。"合同定好后不许有自己的理解"的载体。
 3. context：相关文件路径 + 接口摘要（如 "src/auth.ts: sign(uid): string"）。
@@ -51,15 +51,35 @@ const PLAYBOOK = `# pilot-playbook — 契约写作与裁决处理手册
 4. allowed_files：最小充分集。宁可少了补契约，不要顺手撒大网。
 5. acceptance_cmd：可判定命令（vitest/pytest/tsc/build）。禁止"写好测试"这类不可判定表述。
 
-## tier 判定
-- fast：小微改动。门禁降级为零回归（不填 acceptance_cmd），禁止新增测试，改动行数受限。
-- standard：常规特性/修复。acceptance_cmd 必填，门禁真实执行。
+## 门禁设计模式（实战踩坑总结）
+- 门禁范围必须与白名单对齐。acceptance_cmd 在仓库根执行：若它扫描全仓而正则命中
+  白名单外的既有内容，子代理会陷入"通过必须改、契约禁止改"的死锁。插件会检测这种情况：
+  门禁命中全部落在白名单外 → 直接 BLOCKED 免重试；部分越界 → 重试反馈中点名提醒。
+  预防写法：把路径参数写进门禁命令，只扫白名单——
+  pytest 指定测试文件（不是裸 pytest）；Select-String 用 -Path 指定范围；eslint/tsc 指定目标。
+- Windows 陷阱：Select-String 默认大小写不敏感，会命中 p11.3 这类大小写变体——
+  需要区分时加 -CaseSensitive；正则里的路径分隔符要同时兼容正斜杠与反斜杠。
+- 门禁只断言"白名单内改动引入的内容"，不要用它复检整个仓库的历史遗留。
+- 仓库基线可能本来就脏（既有失败/告警）时，契约加 baseline_gate: true：
+  插件派发前先自检门禁，基线不绿则不派发，直接 BLOCKED 并附基线输出与越界命中分析，
+  省一次子代理成本。门禁开销大（全量测试）时按需开启。
+
+## 基础设施失败与契约失败分开处理
+- verdict 带 error_class 字段：infrastructure=环境/配置问题；contract=契约/门禁/核验问题。
+- 子代理报 SetNamedSecurityInfoW (Win32 5)、沙箱 ACL 拒绝、命令找不到（exit 127/9009）→
+  属于基础设施失败，插件不重试。处置：修环境或在插件组合里调 sandboxMode（Windows
+  ACL runner 异常时用 danger-full-access），然后原样重派——契约本身没有问题，不要改契约。
+- BLOCKED 时附带 workspace_delta（工作区增量：文件数/行数/未跟踪数）。失败的 attempt
+  半成品仍留在工作区：派新契约前先验收或回滚现场，避免重复劳动。
 
 ## verdict 处理
 - PASS：直接推进下一步，不要复核子代理的工作。
 - FAIL：读 reason 与 error_tail（stderr 尾部，确定性内容）。修改契约（补 detail/context）
-  或修正 acceptance_cmd 后重派；**不要原样重派**——同样输入只会得到同样失败。
-- BLOCKED：读 summary。子代理判断契约有矛盾或缺少上下文——补 context 或拆小任务再派。
+  或修正 acceptance_cmd 后重派；不要原样重派——同样输入只会得到同样失败。
+- BLOCKED：读 reason 与 error_class。两种来源分开处理：
+  - contract：子代理/门禁判定契约矛盾或缺上下文 → 补 context、扩白名单或收窄门禁后重派；
+  - infrastructure：修环境后原样重派。
+  - 先看 workspace_delta 决定保留还是回滚现场，再派新契约。
 - ESCALATED：重试耗尽。升级给人类，或重写契约（通常是 acceptance_cmd 或范围错了）。
 
 ## 防幻觉纪律
@@ -517,7 +537,7 @@ export default {
       ctx.effect(() =>
         skills.register({
           name: 'pilot-playbook',
-          description: 'dsh-pilot 契约写作与裁决处理手册：契约四要素、tier 判定、verdict 失败处理、防幻觉纪律',
+          description: 'dsh-pilot 契约写作与裁决处理手册：契约五要素、门禁范围对齐与 Windows 陷阱、基础设施与契约失败分流、verdict 处理、防幻觉纪律',
           whenToUse: '起草 pilot_dispatch 契约前，或需要处理 FAIL/BLOCKED/ESCALATED 裁决时',
           source: 'runtime',
           invocation: { modelInvocable: cfg.exposure !== 'silent', userInvocable: true },
