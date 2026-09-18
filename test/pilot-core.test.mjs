@@ -24,6 +24,7 @@ import {
   extractGatePaths,
   classifyInfra,
   isCommandNotFoundExit,
+  parseShortstat,
 } from '../pilot-core.mjs'
 
 // ---------- 契约校验 ----------
@@ -315,6 +316,17 @@ test('isCommandNotFoundExit：127 与 9009 命中，其余不命中', () => {
   assert.equal(isCommandNotFoundExit(1), false)
   assert.equal(isCommandNotFoundExit(0), false)
   assert.equal(isCommandNotFoundExit(null), false)
+})
+
+// ---------- 现场增量摘要 ----------
+
+test('parseShortstat：标准行、单数形态、缺省段计 0、无匹配 null', () => {
+  assert.deepEqual(parseShortstat(' 3 files changed, 120 insertions(+), 45 deletions(-)'), { files: 3, insertions: 120, deletions: 45 })
+  assert.deepEqual(parseShortstat(' 1 file changed, 1 insertion(+)'), { files: 1, insertions: 1, deletions: 0 })
+  assert.deepEqual(parseShortstat(' 2 files changed'), { files: 2, insertions: 0, deletions: 0 })
+  assert.deepEqual(parseShortstat(''), null)
+  assert.deepEqual(parseShortstat('ok'), null)
+  assert.deepEqual(parseShortstat(null), null)
 })
 
 // ---------- 杂项 ----------

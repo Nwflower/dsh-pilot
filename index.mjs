@@ -31,6 +31,7 @@ import {
   extractGatePaths,
   classifyInfra,
   isCommandNotFoundExit,
+  parseShortstat,
 } from './pilot-core.mjs'
 
 const WRITE_TOOLS = new Set(['write', 'edit', 'bash', 'pwsh'])
@@ -284,6 +285,34 @@ async function classifyGatePaths(ctx, repoRoot, gateText, allowedFiles) {
   return { inScope, outOfScope }
 }
 
+// ---------- 现场增量摘要（M1.5：非 PASS 裁决让裁决方一眼看清半成品规模） ----------
+
+// 未跟踪文件计数：after porcelain 中 status=?? 且 before 里没有的同名条目。
+function untrackedCount(afterText, beforeText) {
+  const before = new Set(parsePorcelain(beforeText).map((l) => l.status + ' ' + l.path))
+  return parsePorcelain(afterText).filter((l) => l.status === '??' && !before.has('?? ' + l.path)).length
+}
+
+// 摘要失败绝不影响裁决本身：调用方兜 try/catch。
+async function collectWorkspaceDelta(ctx, repoRoot, useGit, exec, cfg, beforeText, lastAfterGitText, lastActual) {
+  if (!useGit) {
+    // 降级快照只有文件级事实（白名单触碰数），行数拿不到
+    return { files: lastActual.length }
+  }
+  let short = null
+  try {
+    short = parseShortstat((await runShell(ctx, repoRoot, 'git diff HEAD --shortstat', exec.signal, cfg.gateTimeoutMs, cfg.sandboxMode)).stdout)
+  } catch {
+    short = null
+  }
+  // shortstat 解析失败（如空仓库无 HEAD）回落 porcelain 触碰数
+  const delta = short
+    ? { files: short.files, insertions: short.insertions, deletions: short.deletions }
+    : { files: lastActual.length }
+  delta.untracked = untrackedCount(lastAfterGitText, beforeText)
+  return delta
+}
+
 // ---------- pilot_dispatch 主体 ----------
 
 function toolParameters() {
@@ -326,6 +355,15 @@ const VERDICT_OUTPUT_SCHEMA = {
     error_tail: { type: 'string' },
     error_class: { type: 'string', enum: ['infrastructure', 'contract', 'unknown'] },
     gate_out_of_scope: { type: 'array', items: { type: 'string' } },
+    workspace_delta: {
+      type: 'object',
+      properties: {
+        files: { type: 'integer' },
+        insertions: { type: 'integer' },
+        deletions: { type: 'integer' },
+        untracked: { type: 'integer' },
+      },
+    },
   },
   required: ['verdict', 'files_changed', 'attempts'],
 }
@@ -341,6 +379,15 @@ function renderVerdict(_args, value) {
   if (Array.isArray(value.gate_out_of_scope) && value.gate_out_of_scope.length > 0) {
     lines.push('gate_out_of_scope: ' + value.gate_out_of_scope.slice(0, 8).join(', '))
   }
+  if (value.workspace_delta) {
+    const d = value.workspace_delta
+    const parts = []
+    if (typeof d.files === 'number' && d.files > 0) parts.push(d.files + ' files')
+    if (typeof d.insertions === 'number' && d.insertions > 0) parts.push('+' + d.insertions)
+    if (typeof d.deletions === 'number' && d.deletions > 0) parts.push('-' + d.deletions)
+    if (typeof d.untracked === 'number' && d.untracked > 0) parts.push(d.untracked + ' untracked')
+    if (parts.length > 0) lines.push('workspace_delta: ' + parts.join(', '))
+  }
   lines.push(`attempts: ${value.attempts}${value.child && value.child.model ? ` (child model: ${value.child.model})` : ''}`)
   const infraHint = value.error_class === 'infrastructure'
   if (value.verdict === 'FAIL' || value.verdict === 'ESCALATED') {
@@ -355,7 +402,7 @@ function renderVerdict(_args, value) {
     lines.push(
       infraHint
         ? '处理：基础设施/环境问题——修复环境后原样重派，契约无需修改。'
-        : '处理：读 reason 裁决方向，补上下文或收窄门禁后再派。',
+        : '处理：读 reason 裁决方向；先看 workspace_delta 决定保留或回滚现场，再派新契约。',
     )
   }
   return [{ type: 'text', text: lines.join('\n') }]
@@ -470,6 +517,7 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
   let lastTail = '' // 最近一轮确定性错误尾部（进入 out.error_tail）
   let lastSnapshotDiag = null // 降级模式诊断：before/after 快照（truth 失败时附入 reason）
   let lastGateScope = null // 最近一轮门禁越界命中分类（进 out.gate_out_of_scope 与 reason 裁决提示）
+  let lastAfterGitText = '' // 最近一轮 after porcelain（现场增量 untracked 计数用）
   for (;;) {
     attempts += 1
     let run
@@ -517,6 +565,7 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
       } catch {
         afterText = beforeText
       }
+      lastAfterGitText = afterText
       actualPaths = changedPaths(beforeText, afterText)
     } else {
       let afterSnapshot
@@ -640,6 +689,14 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
   }
   if ((final.verdict === 'FAIL' || final.verdict === 'ESCALATED') && lastTail) out.error_tail = lastTail
   if (final.error_class) out.error_class = final.error_class
+  if (final.verdict !== 'PASS') {
+    try {
+      out.workspace_delta = await collectWorkspaceDelta(ctx, repoRoot, useGit, exec, cfg, beforeText, lastAfterGitText, lastActual)
+    } catch (e) {
+      // 摘要失败不影响裁决本身：大声记录，主代理仍可从 files_changed 自行判断
+      console.error('[dsh-pilot] 现场增量摘要失败:', e && e.message ? e.message : String(e))
+    }
+  }
   return out
 }
 

@@ -349,6 +349,18 @@ export function isCommandNotFoundExit(exitCode) {
   return exitCode === 127 || exitCode === 9009
 }
 
+// ---------- 现场增量摘要 ----------
+
+// git diff --shortstat 单行解析："3 files changed, 120 insertions(+), 45 deletions(-)"。
+// 单数形态（1 file changed, 1 insertion(+)）同样命中；缺省段计 0；无匹配返回 null。
+export function parseShortstat(text) {
+  const m = /(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/.exec(
+    typeof text === 'string' ? text : '',
+  )
+  if (!m) return null
+  return { files: Number(m[1]), insertions: Number(m[2] || 0), deletions: Number(m[3] || 0) }
+}
+
 // ---------- 子代理 prompt 组装 ----------
 
 export function buildChildPrompt(contract, feedback) {

@@ -91,8 +91,9 @@ function mockShell(statusScript, gateQueue) {
   }
 }
 
-// mock shell（扩展版）：gitScript 依次出 porcelain 行；gateScript 依次出 { exitCode, stderr }
-function mockShellExt(gitScript, gateScript) {
+// mock shell（扩展版）：gitScript 依次出 porcelain 行；gateScript 依次出 { exitCode, stderr }；
+// shortstatScript 依次出 git diff --shortstat 行
+function mockShellExt(gitScript, gateScript, shortstatScript = []) {
   return {
     resolve(r) {
       return r
@@ -100,6 +101,9 @@ function mockShellExt(gitScript, gateScript) {
     async run(spec) {
       if (spec.command.startsWith('git status --porcelain')) {
         return { exitCode: 0, timedOut: false, stdout: { text: gitScript.shift() ?? '' }, stderr: { text: '' } }
+      }
+      if (spec.command.startsWith('git diff')) {
+        return { exitCode: 0, timedOut: false, stdout: { text: shortstatScript.shift() ?? '' }, stderr: { text: '' } }
       }
       const g = gateScript.shift() ?? { exitCode: 0, stderr: '' }
       return { exitCode: g.exitCode, timedOut: false, stdout: { text: g.stdout ?? '' }, stderr: { text: g.stderr ?? '' } }
@@ -534,6 +538,80 @@ test('非 git 工作区降级：哈希快照检测白名单文件变化，门禁
   assert.equal(out.verdict, 'PASS', JSON.stringify(out))
   assert.deepEqual(out.files_changed, ['hello.txt'])
   assert.equal(out.gate.exit_code, 0)
+})
+
+test('BLOCKED 附带 workspace_delta：git 模式 shortstat + 未跟踪计数（M1.5）', async (t) => {
+  const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { ctx } = mockCtx(root)
+  const sub = mockSubagents([{ result: Promise.resolve({ stopReason: 'refusal', output: [] }) }])
+  ctx.subagents = sub
+  ctx.shell = mockShellExt(['', ' M src/auth.ts\n?? docs/new.md\n'], [], [' 3 files changed, 120 insertions(+), 45 deletions(-)'])
+  plugin.apply(ctx, {})
+  const out = await ctx.tools.get('pilot_dispatch').execute({ ...CONTRACT }, execOf(agent('master', root)))
+  assert.equal(out.verdict, 'BLOCKED')
+  assert.deepEqual(out.workspace_delta, { files: 3, insertions: 120, deletions: 45, untracked: 1 })
+})
+
+test('BLOCKED 附带 workspace_delta：非 git 降级回落触碰文件数（M1.5）', async (t) => {
+  const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { ctx } = mockCtx(root)
+  let written = false
+  let releaseResult
+  const sub = mockSubagents([
+    {
+      result: new Promise((res) => {
+        releaseResult = () => res({ stopReason: 'completed', structured: { status: 'blocked', summary: '白名单与门禁冲突', files_changed: [], test_ran: false }, output: [] })
+      }).then((r) => {
+        written = true
+        return r
+      }),
+    },
+  ])
+  ctx.subagents = sub
+  const gitFails = {
+    resolve(r) {
+      return r
+    },
+    async run(spec) {
+      if (spec.command.startsWith('git ')) return { exitCode: 128, timedOut: false, stdout: { text: '' }, stderr: { text: 'fatal: not a git repository' } }
+      return { exitCode: 0, timedOut: false, stdout: { text: 'ok' }, stderr: { text: '' } }
+    },
+  }
+  ctx.shell = gitFails
+  ctx.fs = {
+    async resolve(p) {
+      return { path: p }
+    },
+    async readText(target) {
+      if (!written) throw new Error('ENOENT: ' + target.path)
+      return 'half-done\n'
+    },
+  }
+  plugin.apply(ctx, {})
+  const pending = ctx.tools
+    .get('pilot_dispatch')
+    .execute(
+      { goal: '写冒烟文件', detail: '写 hello.txt', allowed_files: ['hello.txt'], acceptance_cmd: 'node check.cjs' },
+      execOf(agent('master', root)),
+    )
+  await new Promise((r) => setTimeout(r, 20))
+  releaseResult()
+  const out = await pending
+  assert.equal(out.verdict, 'BLOCKED')
+  assert.deepEqual(out.workspace_delta, { files: 1 }) // 降级快照只有文件级事实，无 untracked 概念
+})
+
+test('renderVerdict：BLOCKED 带 workspace_delta 与基础设施分流提示', () => {
+  const { ctx } = mockCtx()
+  plugin.apply(ctx, {})
+  const render = ctx.tools.get('pilot_dispatch').output.render
+  const blocked = render({}, { verdict: 'BLOCKED', reason: 'r', files_changed: [], attempts: 1, workspace_delta: { files: 3, insertions: 120, deletions: 45, untracked: 1 } })
+  assert.ok(blocked[0].text.includes('workspace_delta: 3 files, +120, -45, 1 untracked'))
+  assert.ok(blocked[0].text.includes('保留或回滚现场'))
+  const infra = render({}, { verdict: 'BLOCKED', reason: 'r', files_changed: [], attempts: 1, error_class: 'infrastructure' })
+  assert.ok(infra[0].text.includes('修复环境后原样重派'))
 })
 
 test('renderVerdict：紧凑文本，PASS 不带处理提示，FAIL 带 error_tail 与处理指引', () => {
