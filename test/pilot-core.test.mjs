@@ -293,12 +293,16 @@ test('extractShellWriteTargets：引号字面量不误报、只读命令无目�
 
 // ---------- 非 git 降级 ----------
 
-test('fnv1aHex：确定性、内容敏感、非字节流返回 null', () => {
+test('fnv1aHex：确定性、内容敏感、非对象返回 null、跨 realm 类字节流可用', () => {
   const a = fnv1aHex(new TextEncoder().encode('pilot-ok\n'))
   assert.equal(a, fnv1aHex(new TextEncoder().encode('pilot-ok\n')))
   assert.notEqual(a, fnv1aHex(new TextEncoder().encode('pilot-no\n')))
   assert.match(a, /^[0-9a-f]{8}$/)
   assert.equal(fnv1aHex('nope'), null)
+  assert.equal(fnv1aHex(null), null)
+  // 模拟跨 realm：普通对象形式的字节序列也能算
+  const fake = { length: 3, 0: 104, 1: 105, 2: 33 }
+  assert.match(fnv1aHex(fake), /^[0-9a-f]{8}$/)
 })
 
 test('snapshotChanged：出现/消失/内容变化都算变化；无变化返回空', () => {

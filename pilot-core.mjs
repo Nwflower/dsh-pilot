@@ -349,11 +349,12 @@ export function loadConfig(partial = {}) {
 
 // FNV-1a 32 位：字节流 → 8 位 hex。降级快照用；碰撞概率对变更检测足够低，
 // 不追求密码学强度（这里只回答"文件内容变没变"）。
+// 鸭子类型判定字节流：动态插件域里 TextEncoder 来自宿主 realm，instanceof Uint8Array 恒 false。
 export function fnv1aHex(bytes) {
-  if (!(bytes instanceof Uint8Array)) return null
+  if (typeof bytes !== 'object' || bytes === null || typeof bytes.length !== 'number') return null
   let hash = 0x811c9dc5
   for (let i = 0; i < bytes.length; i++) {
-    hash ^= bytes[i]
+    hash ^= bytes[i] & 0xff
     hash = (hash * 0x01000193) >>> 0
   }
   return hash.toString(16).padStart(8, '0')
