@@ -139,8 +139,9 @@ function changedPaths(beforeText, afterText) {
 // 目录下新建文件在降级模式检测不到。
 
 // 单条目快照：读文本（语义清晰、跨实现稳定）→ UTF-8 字节 → FNV-1a hex。
+// 绝对路径不需要 cwd——实测把文件路径当 cwd 传给 resolve 会抛错（曾被逐条 catch 吞成 null）。
 async function snapshotEntry(fs, absPath, signal) {
-  const target = await fs.resolve(absPath, { cwd: absPath })
+  const target = await fs.resolve(absPath)
   const info = await fs.stat(target, signal)
   if (info === undefined) return null
   const text = await fs.readText(target, signal)
