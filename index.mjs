@@ -104,12 +104,14 @@ async function resolveRepoRoot(ctx, cwd) {
 
 // ---------- shell 执行（门禁与 git 快照共用） ----------
 
-async function runShell(ctx, repoRoot, command, signal, timeoutMs) {
+async function runShell(ctx, repoRoot, command, signal, timeoutMs, sandboxMode) {
   const shell = ctx.get('shell')
   if (!shell || typeof shell.resolve !== 'function' || typeof shell.run !== 'function') {
     throw new Error('shell 服务不可用：无法执行门禁/快照命令')
   }
-  const spec = shell.resolve({ command, workdir: repoRoot, timeoutMs, signal })
+  // sandboxMode 缺省不传（shell 按部署默认）；显式配置时沿用（DESIGN §10：门禁沿会话沙箱策略）
+  const sandboxPolicy = sandboxMode ? { mode: sandboxMode, workspaceRoot: repoRoot } : undefined
+  const spec = shell.resolve({ command, workdir: repoRoot, timeoutMs, signal, sandboxPolicy })
   const r = await shell.run(spec)
   return {
     exitCode: r.exitCode,
@@ -159,7 +161,9 @@ async function snapshotWhitelist(ctx, repoRoot, allowedFiles, signal) {
       snapshot[rel] = fnv1aHex(bytes)
     } catch (e) {
       if (signal && signal.aborted) throw e
-      snapshot[rel] = null // 读不到（权限等）→ 视为不存在；写后出现即判变化
+      // 静默吞掉会让 after 快照误判"无变化"→ 回执被冤判虚报；大声记录
+      console.error('[dsh-pilot] 白名单快照读取失败:', rel, e && e.message ? e.message : String(e))
+      snapshot[rel] = null
     }
   }
   return snapshot
@@ -337,7 +341,7 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
   let beforeText = ''
   let beforeSnapshot = null
   try {
-    const g = await runShell(ctx, repoRoot, 'git status --porcelain', exec.signal, cfg.gateTimeoutMs)
+    const g = await runShell(ctx, repoRoot, 'git status --porcelain', exec.signal, cfg.gateTimeoutMs, cfg.sandboxMode)
     if (g.exitCode !== 0) useGit = false
     else beforeText = g.stdout
   } catch {
@@ -392,7 +396,7 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
     if (useGit) {
       let afterText
       try {
-        afterText = (await runShell(ctx, repoRoot, 'git status --porcelain', exec.signal, cfg.gateTimeoutMs)).stdout
+        afterText = (await runShell(ctx, repoRoot, 'git status --porcelain', exec.signal, cfg.gateTimeoutMs, cfg.sandboxMode)).stdout
       } catch {
         afterText = beforeText
       }
@@ -413,7 +417,7 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
     let gateTail = ''
     if (contract.acceptance_cmd) {
       try {
-        const g = await runShell(ctx, repoRoot, contract.acceptance_cmd, exec.signal, cfg.gateTimeoutMs)
+        const g = await runShell(ctx, repoRoot, contract.acceptance_cmd, exec.signal, cfg.gateTimeoutMs, cfg.sandboxMode)
         gate = { cmd: contract.acceptance_cmd, exitCode: g.exitCode === null ? -1 : g.exitCode, timedOut: g.timedOut }
         gateTail = tailText(g.stderr || g.stdout, 1200)
       } catch (e) {

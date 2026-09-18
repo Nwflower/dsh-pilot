@@ -10,6 +10,7 @@
 #       maxRetries: 2                # 契约缺省重试上限（0..5，契约可覆盖）
 #       gateTimeoutMs: 300000        # 门禁/快照命令超时（默认 5min）
 #       feedbackMaxChars: 2000       # 重试反馈截断长度
+#       sandboxMode: danger-full-access  # 门禁/快照命令沙箱档（缺省交部署默认；Windows ACL runner 异常时显式设本档）
 - insert:
     - id: dsh-pilot
       name: dsh-pilot

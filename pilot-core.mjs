@@ -337,6 +337,7 @@ export function loadConfig(partial = {}) {
     maxRetries: 2,
     gateTimeoutMs: 300000,
     feedbackMaxChars: 2000,
+    sandboxMode: undefined, // 'read-only'|'workspace-write'|'danger-full-access'；缺省交部署默认
   }
   for (const key of Object.keys(base)) {
     if (partial && partial[key] !== undefined) base[key] = partial[key]
