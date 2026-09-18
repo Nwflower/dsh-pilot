@@ -22,6 +22,8 @@ import {
   fnv1aHex,
   snapshotChanged,
   extractGatePaths,
+  classifyInfra,
+  isCommandNotFoundExit,
 } from '../pilot-core.mjs'
 
 // ---------- 契约校验 ----------
@@ -288,6 +290,31 @@ test('extractGatePaths：行号后缀、Windows 路径、尾随标点、URL 排�
   assert.deepEqual(extractGatePaths('dup src/a.ts again src/a.ts:9'), ['src/a.ts'])
   assert.deepEqual(extractGatePaths(''), [])
   assert.deepEqual(extractGatePaths(null), [])
+})
+
+// ---------- 基础设施失败识别 ----------
+
+test('classifyInfra：沙箱 ACL/Win32/EPERM/spawn ENOENT/拒绝访问 命中；普通错误与空值不命中', () => {
+  for (const hit of [
+    'SetNamedSecurityInfoW (Win32 5): sandbox ACL denied',
+    'spawn git ENOENT',
+    'EPERM: operation not permitted',
+    'Access is denied. (os error 5)',
+    '系统提示：拒绝访问。',
+  ]) {
+    assert.equal(classifyInfra(hit), true, hit)
+  }
+  for (const miss of [null, '', 'upstream model API timeout', 'expected 1 to be 2', '模型输出超长']) {
+    assert.equal(classifyInfra(miss), false, String(miss))
+  }
+})
+
+test('isCommandNotFoundExit：127 与 9009 命中，其余不命中', () => {
+  assert.equal(isCommandNotFoundExit(127), true)
+  assert.equal(isCommandNotFoundExit(9009), true)
+  assert.equal(isCommandNotFoundExit(1), false)
+  assert.equal(isCommandNotFoundExit(0), false)
+  assert.equal(isCommandNotFoundExit(null), false)
 })
 
 // ---------- 杂项 ----------

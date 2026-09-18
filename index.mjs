@@ -29,6 +29,8 @@ import {
   fnv1aHex,
   snapshotChanged,
   extractGatePaths,
+  classifyInfra,
+  isCommandNotFoundExit,
 } from './pilot-core.mjs'
 
 const WRITE_TOOLS = new Set(['write', 'edit', 'bash', 'pwsh'])
@@ -340,11 +342,22 @@ function renderVerdict(_args, value) {
     lines.push('gate_out_of_scope: ' + value.gate_out_of_scope.slice(0, 8).join(', '))
   }
   lines.push(`attempts: ${value.attempts}${value.child && value.child.model ? ` (child model: ${value.child.model})` : ''}`)
+  const infraHint = value.error_class === 'infrastructure'
   if (value.verdict === 'FAIL' || value.verdict === 'ESCALATED') {
     if (value.error_tail) lines.push('error_tail:\n' + value.error_tail)
-    lines.push('处理：修改契约（detail/context/acceptance_cmd）后重新 pilot_dispatch；勿原样重派。')
+    lines.push(
+      infraHint
+        ? '处理：基础设施/环境问题——修复环境后原样重派，契约无需修改。'
+        : '处理：修改契约（detail/context/acceptance_cmd）后重新 pilot_dispatch；勿原样重派。',
+    )
   }
-  if (value.verdict === 'BLOCKED') lines.push('处理：读 reason/summary，补上下文或拆小任务后再派。')
+  if (value.verdict === 'BLOCKED') {
+    lines.push(
+      infraHint
+        ? '处理：基础设施/环境问题——修复环境后原样重派，契约无需修改。'
+        : '处理：读 reason 裁决方向，补上下文或收窄门禁后再派。',
+    )
+  }
   return [{ type: 'text', text: lines.join('\n') }]
 }
 
@@ -432,7 +445,7 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
         files_changed: [],
         attempts: 0,
         gate: { cmd: contract.acceptance_cmd, exit_code: exitCode },
-        error_class: baseRunnerError ? 'infrastructure' : 'contract',
+        error_class: baseRunnerError || isCommandNotFoundExit(exitCode) ? 'infrastructure' : 'contract',
         reason:
           'baseline_gate 自检：门禁在派发前即失败（exit ' + exitCode + (base && base.timedOut ? '，超时' : '') +
           '），失败非本次改动引入，未派发子代理。' +
@@ -463,7 +476,16 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
     try {
       run = await dispatchOnce(ctx, cfg, contract, { repoRoot, parent: exec.agent, signal: exec.signal, feedback, attempt: attempts })
     } catch (e) {
-      last = { verdict: 'FAIL', retryable: false, reason: '派发子代理失败：' + (e && e.message ? e.message : String(e)) }
+      // 契约在派发前已过校验：到这一步的失败都是基础设施/配置问题，重试子代理无意义
+      last = {
+        verdict: 'BLOCKED',
+        retryable: false,
+        cause: 'dispatch',
+        error_class: 'infrastructure',
+        reason:
+          '派发子代理失败（基础设施/配置）：' + (e && e.message ? e.message : String(e)) +
+          '。修复环境或配置后原样重派，契约无需修改。',
+      }
       break
     }
     // 子代理白名单登记（守卫按 agent.id 查这张表；start 返回即登记，竞态窗口极小）
@@ -531,13 +553,37 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
       gateScope = await classifyGatePaths(ctx, repoRoot, gateText, contract.allowed_files)
     }
 
-    const dv = determineVerdict({
+    let dv = determineVerdict({
       childStopReason: result ? result.stopReason : 'error',
       receipt,
       scope,
       truth,
       gate,
     })
+    // 基础设施失败分流（M1.5 反馈）：沙箱 ACL/缺二进制等持久性环境问题重试无意义，
+    // 直接 BLOCKED 并点名"修环境原样重派"——避免把环境问题误判为任务不可行
+    if (dv.cause === 'child-error' && result && result.diagnostic && classifyInfra(String(result.diagnostic))) {
+      dv = {
+        verdict: 'BLOCKED',
+        retryable: false,
+        cause: 'child-infra',
+        error_class: 'infrastructure',
+        reason:
+          '基础设施失败（子代理执行错误）：' + tailText(String(result.diagnostic), 300) +
+          '。修复环境或调整 sandboxMode 后原样重派，契约无需修改。',
+      }
+    } else if (dv.cause === 'gate' && (gateRunnerError !== null || isCommandNotFoundExit(gate.exitCode))) {
+      dv = {
+        verdict: 'BLOCKED',
+        retryable: false,
+        cause: 'gate-infra',
+        error_class: 'infrastructure',
+        reason:
+          gateRunnerError !== null
+            ? '门禁无法执行（基础设施）：' + gateRunnerError + '。修复环境或调整 sandboxMode 后重派。'
+            : '门禁命令找不到（exit ' + gate.exitCode + '）：二进制不在 PATH 或命令名写错。修复环境或修正 acceptance_cmd 后重派。',
+      }
+    }
     // 注意不做硬短路：门禁输出点名白名单外文件≠"必须改它"（失败测试天然打印测试文件名）。
     // 环内只注记（反馈+输出），确定性死锁判定交给 baseline_gate 派发前自检；耗尽后 reason 附裁决提示。
     last = dv

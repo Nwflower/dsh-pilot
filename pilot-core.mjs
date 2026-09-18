@@ -322,6 +322,33 @@ export function extractGatePaths(text) {
   return out
 }
 
+// ---------- 基础设施失败识别 ----------
+
+// 持久性基础设施失败特征：重试子代理无意义（沙箱/ACL 拒绝、缺二进制、权限拒绝）。
+// 只套在"非应用输出面"（子代理诊断、shell runner 异常、127/9009 exit code），
+// 绝不套在门禁业务输出上——测试断言文本里出现 EPERM 字样不代表环境有问题。
+const INFRA_PATTERNS = [
+  /setnamedsecurityinfo/i,
+  /\bwin32\s*\d+\b/i,
+  /\bsandbox\b/i,
+  /\beperm\b/i,
+  /\beacces\b/i,
+  /\bebusy\b/i,
+  /\bspawn\s+\S+\s+enoent\b/i,
+  /\baccess (is )?denied\b/i,
+  /拒绝访问/,
+]
+
+export function classifyInfra(text) {
+  if (typeof text !== 'string' || text === '') return false
+  return INFRA_PATTERNS.some((re) => re.test(text))
+}
+
+// 门禁命令找不到的确定性 exit code：POSIX 127 / Windows 9009。
+export function isCommandNotFoundExit(exitCode) {
+  return exitCode === 127 || exitCode === 9009
+}
+
 // ---------- 子代理 prompt 组装 ----------
 
 export function buildChildPrompt(contract, feedback) {

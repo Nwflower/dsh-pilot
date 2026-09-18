@@ -279,7 +279,7 @@ test('重试耗尽 → ESCALATED', async (t) => {
   assert.equal(sub.started, 3)
 })
 
-test('provider 不存在：大声 FAIL 且不派发', async (t) => {
+test('provider 不存在：BLOCKED（基础设施/配置）且不派发', async (t) => {
   const root = await tmpRoot()
   t.after(() => rm(root, { recursive: true, force: true }))
   const { ctx } = mockCtx(root)
@@ -287,9 +287,82 @@ test('provider 不存在：大声 FAIL 且不派发', async (t) => {
   ctx.shell = mockShell(['', ''], [])
   plugin.apply(ctx, { provider: 'nope' })
   const out = await ctx.tools.get('pilot_dispatch').execute({ ...CONTRACT }, execOf(agent('master', root)))
-  assert.equal(out.verdict, 'FAIL')
+  assert.equal(out.verdict, 'BLOCKED')
+  assert.equal(out.error_class, 'infrastructure')
   assert.ok(out.reason.includes('nope'))
   assert.ok(out.reason.includes('fork'))
+  assert.ok(out.reason.includes('原样重派'))
+})
+
+test('子代理诊断命中基础设施特征 → BLOCKED 免重试（M1.5：不把环境问题误判为契约问题）', async (t) => {
+  const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { ctx } = mockCtx(root)
+  const sub = mockSubagents([
+    { result: Promise.reject(new Error('SetNamedSecurityInfoW (Win32 5): sandbox ACL denied')) },
+  ])
+  ctx.subagents = sub
+  ctx.shell = mockShell(['', ''], [])
+  plugin.apply(ctx, { maxRetries: 2 })
+  const out = await ctx.tools.get('pilot_dispatch').execute({ ...CONTRACT }, execOf(agent('master', root)))
+  assert.equal(out.verdict, 'BLOCKED')
+  assert.equal(out.attempts, 1)
+  assert.equal(sub.started, 1, '基础设施失败不得重试')
+  assert.equal(out.error_class, 'infrastructure')
+  assert.ok(out.reason.includes('SetNamedSecurityInfoW'))
+  assert.ok(out.reason.includes('原样重派'))
+})
+
+test('子代理普通错误（无基础设施特征）保持 FAIL 可重试', async (t) => {
+  const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { ctx } = mockCtx(root)
+  const sub = mockSubagents([
+    { result: Promise.reject(new Error('upstream model API timeout')) },
+    { result: Promise.resolve(okReceipt(['src/auth.ts'])) },
+  ])
+  ctx.subagents = sub
+  ctx.shell = mockShell(['', ' M src/auth.ts\n', ' M src/auth.ts\n'], [0, 0])
+  plugin.apply(ctx, {})
+  const out = await ctx.tools.get('pilot_dispatch').execute({ ...CONTRACT }, execOf(agent('master', root)))
+  assert.equal(out.verdict, 'PASS')
+  assert.equal(out.attempts, 2)
+})
+
+test('门禁 runner 异常 → BLOCKED（基础设施）；门禁命令找不到（exit 127）同样分流', async (t) => {
+  const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { ctx } = mockCtx(root)
+  const sub = mockSubagents([{ result: Promise.resolve(okReceipt([])) }]) // 不声称改动：让门禁异常成为唯一失败源
+  ctx.subagents = sub
+  ctx.shell = {
+    resolve(r) {
+      return r
+    },
+    async run(spec) {
+      if (spec.command.startsWith('git status --porcelain')) {
+        return { exitCode: 0, timedOut: false, stdout: { text: '' }, stderr: { text: '' } }
+      }
+      throw new Error('SetNamedSecurityInfoW (Win32 5): sandbox ACL denied')
+    },
+  }
+  plugin.apply(ctx, {})
+  const out = await ctx.tools.get('pilot_dispatch').execute({ ...CONTRACT }, execOf(agent('master', root)))
+  assert.equal(out.verdict, 'BLOCKED')
+  assert.equal(out.attempts, 1)
+  assert.equal(sub.started, 1)
+  assert.equal(out.error_class, 'infrastructure')
+  assert.ok(out.reason.includes('门禁无法执行'))
+
+  const ctx2 = mockCtx(root)
+  const sub2 = mockSubagents([{ result: Promise.resolve(okReceipt([])) }]) // 不声称改动：让 exit 127 成为唯一失败源
+  ctx2.ctx.subagents = sub2
+  ctx2.ctx.shell = mockShellExt(['', ''], [{ exitCode: 127, stderr: 'python: command not found' }])
+  plugin.apply(ctx2.ctx, {})
+  const out2 = await ctx2.tools.get('pilot_dispatch').execute({ ...CONTRACT }, execOf(agent('master', root)))
+  assert.equal(out2.verdict, 'BLOCKED')
+  assert.equal(out2.error_class, 'infrastructure')
+  assert.ok(out2.reason.includes('命令找不到'))
 })
 
 test('回执虚报（files_changed 与实际 diff 不符）→ FAIL + 重试反馈含虚报说明', async (t) => {
