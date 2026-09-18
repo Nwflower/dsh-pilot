@@ -24,7 +24,7 @@ export const RECEIPT_SCHEMA = {
 
 // 白名单字段制：schema 刻意没有 code/patch 字段，出现任何未知键都拒绝——
 // 这是"主代理物理上递不了代码"的硬保证（DESIGN §4.2）。
-const CONTRACT_KEYS = new Set(['goal', 'detail', 'context', 'allowed_files', 'acceptance_cmd', 'tier', 'max_retries'])
+const CONTRACT_KEYS = new Set(['goal', 'detail', 'context', 'allowed_files', 'acceptance_cmd', 'tier', 'max_retries', 'baseline_gate'])
 
 export function validateContract(input) {
   const errors = []
@@ -95,9 +95,18 @@ export function validateContract(input) {
     else errors.push('max_retries 必须是 0..5 的整数')
   }
 
+  // baseline_gate：派发前先自检 acceptance_cmd；基线不绿（既有失败）则不派发直接 BLOCKED。
+  // 防御"门禁命中白名单外既有内容"与脏基线下的重试浪费（M1.5 反馈）。
+  let baselineGate
+  if (input.baseline_gate !== undefined) {
+    if (typeof input.baseline_gate === 'boolean') baselineGate = input.baseline_gate
+    else errors.push('baseline_gate 必须是布尔值')
+  }
+
   if (errors.length > 0) return { ok: false, errors }
   const contract = { goal, detail, context, allowed_files: allowedFiles, tier, max_retries: maxRetries }
   if (acceptanceCmd !== undefined) contract.acceptance_cmd = acceptanceCmd
+  if (baselineGate !== undefined) contract.baseline_gate = baselineGate
   return { ok: true, contract }
 }
 
@@ -238,31 +247,36 @@ export function extractReceiptJson(text) {
 // ---------- 裁决 ----------
 
 // 确定性裁决状态机（DESIGN §4.3/§6.2）：顺序即优先级。
+// cause = 失败归因（host 据此做结构性短路），error_class = 裁决方处置分流：
+// contract=改契约/改门禁，infrastructure=修环境原样重派，unknown=证据不足。
+// PASS 不带这两个字段（成功没有归因）。
 export function determineVerdict(input) {
   const i = input || {}
   if (typeof i.dispatchError === 'string' && i.dispatchError !== '') {
-    return { verdict: 'FAIL', retryable: false, reason: i.dispatchError }
+    return { verdict: 'FAIL', retryable: false, cause: 'dispatch', error_class: 'infrastructure', reason: i.dispatchError }
   }
   if (i.childStopReason !== 'completed') {
-    if (i.childStopReason === 'aborted') return { verdict: 'BLOCKED', retryable: false, reason: '子代理被中止' }
-    if (i.childStopReason === 'refusal') return { verdict: 'BLOCKED', retryable: false, reason: '子代理拒绝执行' }
-    if (i.childStopReason === 'error') return { verdict: 'FAIL', retryable: true, reason: '子代理执行错误' }
-    if (i.childStopReason === 'max-tokens') return { verdict: 'FAIL', retryable: true, reason: '子代理输出超长' }
-    return { verdict: 'FAIL', retryable: false, reason: '子代理异常结束: ' + String(i.childStopReason) }
+    if (i.childStopReason === 'aborted') return { verdict: 'BLOCKED', retryable: false, cause: 'child-aborted', error_class: 'contract', reason: '子代理被中止' }
+    if (i.childStopReason === 'refusal') return { verdict: 'BLOCKED', retryable: false, cause: 'child-refusal', error_class: 'contract', reason: '子代理拒绝执行' }
+    if (i.childStopReason === 'error') return { verdict: 'FAIL', retryable: true, cause: 'child-error', error_class: 'unknown', reason: '子代理执行错误' }
+    if (i.childStopReason === 'max-tokens') return { verdict: 'FAIL', retryable: true, cause: 'child-max-tokens', error_class: 'unknown', reason: '子代理输出超长' }
+    return { verdict: 'FAIL', retryable: false, cause: 'child', error_class: 'unknown', reason: '子代理异常结束: ' + String(i.childStopReason) }
   }
   if (i.receipt == null) {
-    return { verdict: 'FAIL', retryable: true, reason: '子代理未返回有效回执' }
+    return { verdict: 'FAIL', retryable: true, cause: 'receipt', error_class: 'contract', reason: '子代理未返回有效回执' }
   }
   if (i.receipt.status === 'blocked') {
-    return { verdict: 'BLOCKED', retryable: false, reason: i.receipt.summary || '子代理报告无法完成' }
+    return { verdict: 'BLOCKED', retryable: false, cause: 'child-blocked', error_class: 'contract', reason: i.receipt.summary || '子代理报告无法完成' }
   }
   if (i.scope && i.scope.ok === false) {
-    return { verdict: 'FAIL', retryable: true, reason: '越界修改: ' + i.scope.violations.join('、') }
+    return { verdict: 'FAIL', retryable: true, cause: 'scope', error_class: 'contract', reason: '越界修改: ' + i.scope.violations.join('、') }
   }
   if (i.truth && i.truth.truthful === false) {
     return {
       verdict: 'FAIL',
       retryable: true,
+      cause: 'truth',
+      error_class: 'contract',
       reason:
         '回执虚报：声称改了但没改 ' +
         (i.truth.claimedNotChanged.join('、') || '无') +
@@ -271,17 +285,41 @@ export function determineVerdict(input) {
     }
   }
   if (i.gate && (i.gate.exitCode !== 0 || i.gate.timedOut === true)) {
-    return { verdict: 'FAIL', retryable: true, reason: '门禁失败（exit ' + i.gate.exitCode + (i.gate.timedOut ? '，超时' : '') + '）: ' + i.gate.cmd }
+    return { verdict: 'FAIL', retryable: true, cause: 'gate', error_class: 'contract', reason: '门禁失败（exit ' + i.gate.exitCode + (i.gate.timedOut ? '，超时' : '') + '）: ' + i.gate.cmd }
   }
   return { verdict: 'PASS', retryable: false }
 }
 
-// 重试耗尽后调用：可重试的 FAIL 升级为 ESCALATED。
+// 重试耗尽后调用：可重试的 FAIL 升级为 ESCALATED。展开保留 cause/error_class——
+// 裁决方在耗尽场景同样需要知道该改契约还是修环境。
 export function escalate(result) {
   if (result && result.verdict === 'FAIL' && result.retryable) {
-    return { verdict: 'ESCALATED', retryable: false, reason: result.reason }
+    return { ...result, verdict: 'ESCALATED', retryable: false }
   }
   return result
+}
+
+// ---------- 门禁输出路径提取（越界命中检测用） ----------
+
+// 从门禁输出里提取路径形 token（尽力而为、确定性）：只认带路径分隔符的形态，
+// 剥除 :行号(:列号) 与尾随标点；URL、裸文件名不算。白名单核验在 host 做（需要 repoRoot）。
+const GATE_PATH_TOKEN = /[^\s"'`|<>;&()[\]]+[\\/][^\s"'`|<>;&()[\]]+/g
+const URL_PREFIX = /^[a-z][a-z0-9+.-]*:\/\//i
+
+export function extractGatePaths(text) {
+  if (typeof text !== 'string' || text === '') return []
+  const out = []
+  const seen = new Set()
+  for (const raw of text.match(GATE_PATH_TOKEN) || []) {
+    if (URL_PREFIX.test(raw)) continue
+    let p = raw.replace(/:\d+(?::\d+)?$/, '') // path:line(:col)
+    p = p.replace(/[.,;:、。）)】]+$/, '') // 尾随标点
+    p = normalizeRelPath(p)
+    if (p === '' || seen.has(p)) continue
+    seen.add(p)
+    out.push(p)
+  }
+  return out
 }
 
 // ---------- 子代理 prompt 组装 ----------
@@ -330,6 +368,7 @@ export function loadConfig(partial = {}) {
     gateTimeoutMs: 300000,
     feedbackMaxChars: 2000,
     sandboxMode: undefined, // 'read-only'|'workspace-write'|'danger-full-access'；缺省交部署默认
+    baselineGate: false, // 契约未显式给 baseline_gate 时的插件级默认（派发前门禁自检）
   }
   for (const key of Object.keys(base)) {
     if (partial && partial[key] !== undefined) base[key] = partial[key]
@@ -409,7 +448,8 @@ function positionalTargets(cmd, positional) {
   return positional.length ? [positional[0]] : []
 }
 
-export function extractShellWriteTargets(command) {  const out = new Set()
+export function extractShellWriteTargets(command) {
+  const out = new Set()
   const tokens = splitCommandArgs(String(command))
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]

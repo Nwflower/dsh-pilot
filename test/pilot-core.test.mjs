@@ -21,6 +21,7 @@ import {
   extractShellWriteTargets,
   fnv1aHex,
   snapshotChanged,
+  extractGatePaths,
 } from '../pilot-core.mjs'
 
 // ---------- 契约校验 ----------
@@ -69,6 +70,17 @@ test('validateContract：未知键 foo 被拒', () => {
   const v = validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], foo: 1 })
   assert.equal(v.ok, false)
   assert.ok(v.errors.some((e) => e.includes('foo')))
+})
+
+test('validateContract：baseline_gate 布尔通过、非布尔被拒、缺省不出现在契约', () => {
+  const a = validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], acceptance_cmd: 't', baseline_gate: true })
+  assert.equal(a.ok, true)
+  assert.equal(a.contract.baseline_gate, true)
+  const b = validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], baseline_gate: 'yes' })
+  assert.equal(b.ok, false)
+  assert.ok(b.errors.some((e) => e.includes('baseline_gate')))
+  const c = validateContract({ goal: 'g', detail: 'd', allowed_files: ['a.ts'], acceptance_cmd: 't' })
+  assert.equal(c.contract.baseline_gate, undefined)
 })
 
 test('validateContract：context 项缺 path 被拒；note 空串视为无', () => {
@@ -174,6 +186,28 @@ test('determineVerdict：全绿 PASS', () => {
   assert.deepEqual(v, { verdict: 'PASS', retryable: false })
 })
 
+test('determineVerdict：失败分支带 cause 与 error_class', () => {
+  const base = { childStopReason: 'completed', receipt: { status: 'completed', files_changed: [], test_ran: true }, scope: { ok: true, violations: [] }, truth: { truthful: true, claimedNotChanged: [], changedNotClaimed: [] } }
+  const g = determineVerdict({ ...base, gate: { cmd: 't', exitCode: 2, timedOut: false } })
+  assert.equal(g.cause, 'gate')
+  assert.equal(g.error_class, 'contract')
+  const t = determineVerdict({ ...base, truth: { truthful: false, claimedNotChanged: ['g'], changedNotClaimed: ['h'] } })
+  assert.equal(t.cause, 'truth')
+  const e = determineVerdict({ ...base, childStopReason: 'error' })
+  assert.equal(e.cause, 'child-error')
+  assert.equal(e.error_class, 'unknown')
+  const d = determineVerdict({ dispatchError: 'sandbox 崩了' })
+  assert.equal(d.cause, 'dispatch')
+  assert.equal(d.error_class, 'infrastructure')
+})
+
+test('escalate：升级保留 cause 与 error_class（耗尽场景仍需处置分流）', () => {
+  const up = escalate({ verdict: 'FAIL', retryable: true, cause: 'gate', error_class: 'contract', reason: 'r' })
+  assert.equal(up.verdict, 'ESCALATED')
+  assert.equal(up.cause, 'gate')
+  assert.equal(up.error_class, 'contract')
+})
+
 test('determineVerdict：stopReason 分支', () => {
   const base = { receipt: { status: 'completed', files_changed: [], test_ran: true }, scope: { ok: true, violations: [] }, truth: { truthful: true, claimedNotChanged: [], changedNotClaimed: [] } }
   assert.equal(determineVerdict({ ...base, childStopReason: 'aborted' }).verdict, 'BLOCKED')
@@ -242,6 +276,18 @@ test('buildChildPrompt：含契约要素与回执格式；fast 档禁新增测�
   const fb = buildChildPrompt({ goal: 'g', detail: 'd', context: [], allowed_files: ['a'] }, '门禁失败：exit 1')
   assert.ok(fb.includes('上一轮失败反馈'))
   assert.ok(fb.includes('exit 1'))
+})
+
+// ---------- 门禁输出路径提取 ----------
+
+test('extractGatePaths：行号后缀、Windows 路径、尾随标点、URL 排除、去重', () => {
+  assert.deepEqual(extractGatePaths('FAIL tests\\test_agent_loop.py:272\nexpected 1 to be 2'), ['tests/test_agent_loop.py'])
+  assert.deepEqual(extractGatePaths('at C:/repo/src/a.ts:27:5 in foo'), ['C:/repo/src/a.ts'])
+  assert.deepEqual(extractGatePaths('hits in tests/test_x.py(272), src/evil.ts;'), ['tests/test_x.py', 'src/evil.ts'])
+  assert.deepEqual(extractGatePaths('see https://example.com/a.js for docs'), [])
+  assert.deepEqual(extractGatePaths('dup src/a.ts again src/a.ts:9'), ['src/a.ts'])
+  assert.deepEqual(extractGatePaths(''), [])
+  assert.deepEqual(extractGatePaths(null), [])
 })
 
 // ---------- 杂项 ----------

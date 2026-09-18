@@ -91,6 +91,22 @@ function mockShell(statusScript, gateQueue) {
   }
 }
 
+// mock shell（扩展版）：gitScript 依次出 porcelain 行；gateScript 依次出 { exitCode, stderr }
+function mockShellExt(gitScript, gateScript) {
+  return {
+    resolve(r) {
+      return r
+    },
+    async run(spec) {
+      if (spec.command.startsWith('git status --porcelain')) {
+        return { exitCode: 0, timedOut: false, stdout: { text: gitScript.shift() ?? '' }, stderr: { text: '' } }
+      }
+      const g = gateScript.shift() ?? { exitCode: 0, stderr: '' }
+      return { exitCode: g.exitCode, timedOut: false, stdout: { text: g.stdout ?? '' }, stderr: { text: g.stderr ?? '' } }
+    },
+  }
+}
+
 // mock subagents：start 按脚本依次出 child；childId=child-N；记录 prompts
 function mockSubagents(script) {
   let n = 0
@@ -292,6 +308,76 @@ test('回执虚报（files_changed 与实际 diff 不符）→ FAIL + 重试反�
   assert.equal(out.attempts, 2)
   assert.ok(sub.prompts[1].includes('回执虚报'))
   assert.ok(sub.prompts[1].includes('src/other.ts'))
+})
+
+test('门禁命中全部越界：注记 gate_out_of_scope 并在耗尽 reason 附死锁裁决提示，不硬短路重试环（M1.5）', async (t) => {
+  const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { ctx } = mockCtx(root)
+  const sub = mockSubagents([{ result: Promise.resolve(okReceipt([])) }]) // 不声称改动：让 gate 成为唯一失败源
+  ctx.subagents = sub
+  ctx.shell = mockShellExt(['', ''], [{ exitCode: 1, stderr: 'p11.3 matched in docs/notes.md:12' }])
+  plugin.apply(ctx, { maxRetries: 0 }) // 1 次派发即耗尽
+  const out = await ctx.tools.get('pilot_dispatch').execute({ ...CONTRACT }, execOf(agent('master', root)))
+  assert.equal(out.verdict, 'ESCALATED')
+  assert.equal(sub.started, 1)
+  assert.deepEqual(out.gate_out_of_scope, ['docs/notes.md'])
+  assert.ok(out.reason.includes('白名单外'), JSON.stringify(out))
+  assert.ok(out.reason.includes('baseline_gate'))
+})
+
+test('门禁命中部分越界：重试反馈点名白名单外文件，环路照常（M1.5）', async (t) => {
+  const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { ctx } = mockCtx(root)
+  const sub = mockSubagents([
+    { result: Promise.resolve(okReceipt(['src/auth.ts'])) },
+    { result: Promise.resolve(okReceipt(['src/auth.ts'])) },
+  ])
+  ctx.subagents = sub
+  ctx.shell = mockShellExt(['', ' M src/auth.ts\n', ' M src/auth.ts\n'], [
+    { exitCode: 1, stderr: 'FAIL src/auth.ts\nhint: see docs/notes.md:12' },
+    { exitCode: 0, stderr: '' },
+  ])
+  plugin.apply(ctx, {})
+  const out = await ctx.tools.get('pilot_dispatch').execute({ ...CONTRACT }, execOf(agent('master', root)))
+  assert.equal(out.verdict, 'PASS')
+  assert.equal(out.attempts, 2)
+  assert.ok(sub.prompts[1].includes('白名单外'))
+  assert.ok(sub.prompts[1].includes('docs/notes.md'))
+})
+
+test('baseline_gate：基线不绿 → 不派发直接 BLOCKED，附越界命中分析（M1.5）', async (t) => {
+  const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { ctx } = mockCtx(root)
+  const sub = mockSubagents([])
+  ctx.subagents = sub
+  ctx.shell = mockShellExt([''], [{ exitCode: 1, stderr: 'p11.3 matched in docs/notes.md:12' }])
+  plugin.apply(ctx, {})
+  const out = await ctx.tools.get('pilot_dispatch').execute({ ...CONTRACT, baseline_gate: true }, execOf(agent('master', root)))
+  assert.equal(out.verdict, 'BLOCKED')
+  assert.equal(out.attempts, 0)
+  assert.equal(sub.started, 0)
+  assert.ok(out.reason.includes('baseline_gate'))
+  assert.ok(out.reason.includes('白名单外既有文件'))
+  assert.deepEqual(out.gate_out_of_scope, ['docs/notes.md'])
+  assert.equal(out.error_class, 'contract')
+  assert.equal(out.gate.exit_code, 1)
+})
+
+test('baseline_gate：基线绿 → 正常派发不受影响（M1.5）', async (t) => {
+  const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { ctx } = mockCtx(root)
+  const sub = mockSubagents([{ result: Promise.resolve(okReceipt(['src/auth.ts'])) }])
+  ctx.subagents = sub
+  ctx.shell = mockShellExt(['', ' M src/auth.ts\n'], [{ exitCode: 0 }, { exitCode: 0 }])
+  plugin.apply(ctx, {})
+  const out = await ctx.tools.get('pilot_dispatch').execute({ ...CONTRACT, baseline_gate: true }, execOf(agent('master', root)))
+  assert.equal(out.verdict, 'PASS')
+  assert.equal(out.attempts, 1)
+  assert.equal(sub.started, 1)
 })
 
 test('白名单守卫：子代理写白名单内放行、白名单外拒绝、其他代理不受管', async (t) => {

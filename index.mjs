@@ -28,6 +28,7 @@ import {
   extractShellWriteTargets,
   fnv1aHex,
   snapshotChanged,
+  extractGatePaths,
 } from './pilot-core.mjs'
 
 const WRITE_TOOLS = new Set(['write', 'edit', 'bash', 'pwsh'])
@@ -239,6 +240,48 @@ function guardDenyReason(cfg, activeTasks, exec) {
   return null
 }
 
+// ---------- 门禁越界命中分类（M1.5：门禁范围 × 白名单对齐） ----------
+
+// 依赖目录噪声（堆栈/构建产物引用）不参与越界命中统计——误报会把正常门禁失败
+// 冤判成结构性死锁；漏报只是回落普通重试环，代价更小，所以偏保守。
+const DEP_DIR = /(^|\/)(node_modules|venv|\.venv|site-packages|dist|build|coverage|\.git)\//
+const MAX_GATE_HITS = 10
+
+async function pathExistsInRepo(fs, repoRoot, rel) {
+  // fs 不可用时无法证伪：宁可计为命中（fail 到死锁检测），BLOCKED reason 会列清单供裁决方甄别
+  if (!fs || typeof fs.resolve !== 'function' || typeof fs.readText !== 'function') return true
+  try {
+    await fs.readText(await fs.resolve(rel, { cwd: repoRoot }))
+    return true
+  } catch {
+    return false
+  }
+}
+
+// 门禁输出 → { inScope, outOfScope }：相对路径直接核验；绝对路径还原为仓库相对；
+// 白名单外候选须真实存在（readText 可读）才计为命中，防堆栈/文档噪声误判。
+async function classifyGatePaths(ctx, repoRoot, gateText, allowedFiles) {
+  const inScope = []
+  const outOfScope = []
+  for (const raw of extractGatePaths(gateText)) {
+    if (DEP_DIR.test('/' + raw)) continue
+    let rel = raw
+    if (isAbsolute(raw)) {
+      const r = relative(repoRoot, raw)
+      if (r === '' || r.startsWith('..') || isAbsolute(r)) continue // 仓库外引用：忽略
+      rel = normalizeRelPath(r)
+    }
+    if (rel.startsWith('../')) continue
+    if (pathAllowed(rel, allowedFiles)) {
+      if (!inScope.includes(rel)) inScope.push(rel)
+      continue
+    }
+    if (outOfScope.length >= MAX_GATE_HITS) continue
+    if (!outOfScope.includes(rel) && (await pathExistsInRepo(ctx.get('fs'), repoRoot, rel))) outOfScope.push(rel)
+  }
+  return { inScope, outOfScope }
+}
+
 // ---------- pilot_dispatch 主体 ----------
 
 function toolParameters() {
@@ -260,6 +303,7 @@ function toolParameters() {
       acceptance_cmd: { type: 'string', description: '客观验收命令（tier=standard 必填；由插件亲自执行取 exit code）' },
       tier: { type: 'string', enum: ['fast', 'standard'], description: 'fast=小微改动零回归；standard=契约门禁（默认）' },
       max_retries: { type: 'integer', description: '失败重试上限（默认 2，0..5）' },
+      baseline_gate: { type: 'boolean', description: '派发前先自检 acceptance_cmd：基线 exit≠0 则不派发直接 BLOCKED（附越界命中分析）。仓库基线可能本来就不绿时开启' },
     },
     required: ['goal', 'detail', 'allowed_files'],
   }
@@ -278,6 +322,8 @@ const VERDICT_OUTPUT_SCHEMA = {
     attempts: { type: 'integer' },
     child: { type: 'object', properties: { model: { type: 'string' } } },
     error_tail: { type: 'string' },
+    error_class: { type: 'string', enum: ['infrastructure', 'contract', 'unknown'] },
+    gate_out_of_scope: { type: 'array', items: { type: 'string' } },
   },
   required: ['verdict', 'files_changed', 'attempts'],
 }
@@ -289,6 +335,10 @@ function renderVerdict(_args, value) {
     lines.push('files: ' + value.files_changed.slice(0, 10).join(', ') + (value.files_changed.length > 10 ? ` 等 ${value.files_changed.length} 个` : ''))
   }
   if (value.gate) lines.push(`gate: ${value.gate.cmd} → exit ${value.gate.exit_code}`)
+  if (value.error_class) lines.push(`error_class: ${value.error_class}`)
+  if (Array.isArray(value.gate_out_of_scope) && value.gate_out_of_scope.length > 0) {
+    lines.push('gate_out_of_scope: ' + value.gate_out_of_scope.slice(0, 8).join(', '))
+  }
   lines.push(`attempts: ${value.attempts}${value.child && value.child.model ? ` (child model: ${value.child.model})` : ''}`)
   if (value.verdict === 'FAIL' || value.verdict === 'ESCALATED') {
     if (value.error_tail) lines.push('error_tail:\n' + value.error_tail)
@@ -364,6 +414,41 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
     }
   }
 
+  // baseline_gate 自检（契约显式优先，插件级 config.baselineGate 兜底）：门禁基线不绿
+  // 则不派发子代理，直接 BLOCKED——脏基线下重试纯属浪费；附越界命中分析供裁决。
+  const baselineEnabled = contract.baseline_gate !== undefined ? contract.baseline_gate : cfg.baselineGate === true
+  if (baselineEnabled && contract.acceptance_cmd) {
+    let base = null
+    let baseRunnerError = null
+    try {
+      base = await runShell(ctx, repoRoot, contract.acceptance_cmd, exec.signal, cfg.gateTimeoutMs, cfg.sandboxMode)
+    } catch (e) {
+      baseRunnerError = e && e.message ? e.message : String(e)
+    }
+    if (!base || base.exitCode !== 0 || base.timedOut) {
+      const exitCode = base ? (base.exitCode === null ? -1 : base.exitCode) : -1
+      const out = {
+        verdict: 'BLOCKED',
+        files_changed: [],
+        attempts: 0,
+        gate: { cmd: contract.acceptance_cmd, exit_code: exitCode },
+        error_class: baseRunnerError ? 'infrastructure' : 'contract',
+        reason:
+          'baseline_gate 自检：门禁在派发前即失败（exit ' + exitCode + (base && base.timedOut ? '，超时' : '') +
+          '），失败非本次改动引入，未派发子代理。' +
+          (baseRunnerError ? '门禁执行异常：' + baseRunnerError + '。修复环境后重派。' : '请先修复既有失败或修正门禁，再重派。'),
+      }
+      if (base) {
+        const hits = await classifyGatePaths(ctx, repoRoot, (base.stdout || '') + '\n' + (base.stderr || ''), contract.allowed_files)
+        if (hits.outOfScope.length > 0) {
+          out.gate_out_of_scope = hits.outOfScope
+          out.reason += '门禁命中白名单外既有文件：' + hits.outOfScope.join('、') + '——收窄门禁范围（限定路径参数）或扩 allowed_files 后重派。'
+        }
+      }
+      return out
+    }
+  }
+
   let attempts = 0
   let feedback = ''
   let last = null
@@ -371,6 +456,7 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
   let lastGate = null // 最近一轮门禁结果（进入 out.gate）
   let lastTail = '' // 最近一轮确定性错误尾部（进入 out.error_tail）
   let lastSnapshotDiag = null // 降级模式诊断：before/after 快照（truth 失败时附入 reason）
+  let lastGateScope = null // 最近一轮门禁越界命中分类（进 out.gate_out_of_scope 与 reason 裁决提示）
   for (;;) {
     attempts += 1
     let run
@@ -425,15 +511,24 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
 
     let gate = null
     let gateTail = ''
+    let gateText = ''
+    let gateRunnerError = null
     if (contract.acceptance_cmd) {
       try {
         const g = await runShell(ctx, repoRoot, contract.acceptance_cmd, exec.signal, cfg.gateTimeoutMs, cfg.sandboxMode)
         gate = { cmd: contract.acceptance_cmd, exitCode: g.exitCode === null ? -1 : g.exitCode, timedOut: g.timedOut }
+        gateText = (g.stdout || '') + '\n' + (g.stderr || '')
         gateTail = tailText(g.stderr || g.stdout, 1200)
       } catch (e) {
+        gateRunnerError = e && e.message ? e.message : String(e)
         gate = { cmd: contract.acceptance_cmd, exitCode: -1, timedOut: false }
-        gateTail = '门禁命令执行异常：' + (e && e.message ? e.message : String(e))
+        gateTail = '门禁命令执行异常：' + gateRunnerError
       }
+    }
+    // 越界命中分类：只在门禁真实执行且失败时做（runner 异常没有门禁输出可言）
+    let gateScope = null
+    if (gate && (gate.exitCode !== 0 || gate.timedOut) && gateRunnerError === null) {
+      gateScope = await classifyGatePaths(ctx, repoRoot, gateText, contract.allowed_files)
     }
 
     const dv = determineVerdict({
@@ -443,9 +538,12 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
       truth,
       gate,
     })
+    // 注意不做硬短路：门禁输出点名白名单外文件≠"必须改它"（失败测试天然打印测试文件名）。
+    // 环内只注记（反馈+输出），确定性死锁判定交给 baseline_gate 派发前自检；耗尽后 reason 附裁决提示。
     last = dv
     lastActual = actualPaths
     lastGate = gate
+    lastGateScope = gateScope
     lastTail =
       gate && (gate.exitCode !== 0 || gate.timedOut)
         ? gateTail
@@ -458,6 +556,9 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
           gate && (gate.exitCode !== 0 || gate.timedOut) ? `验收命令失败（exit ${gate.exitCode}${gate.timedOut ? ', 超时' : ''}）：\n${gateTail}` : '',
           receipt ? '' : '未检测到有效回执 JSON：完成后必须仅返回契约要求的回执 JSON，不要输出其他散文。',
           result && result.diagnostic ? `子代理诊断：${tailText(String(result.diagnostic), 600)}` : '',
+          gateScope && gateScope.outOfScope.length > 0
+            ? `门禁输出涉及白名单外文件（${gateScope.outOfScope.join('、')}）：这些不在你的白名单内，禁止修改；失败可能由白名单外既有内容触发——只修复白名单内的问题。`
+            : '',
           scope.ok ? '' : `越界修改（白名单外）：${scope.violations.join('、')}`,
           truth.truthful ? '' : `回执虚报：声称改了但没改 ${truth.claimedNotChanged.join('、') || '无'}；实际改了但没报 ${truth.changedNotClaimed.join('、') || '无'}`,
         ],
@@ -481,7 +582,18 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
     out.reason += '；快照诊断 before=' + JSON.stringify(lastSnapshotDiag.before) + ' after=' + JSON.stringify(lastSnapshotDiag.after)
   }
   if (lastGate) out.gate = { cmd: lastGate.cmd, exit_code: lastGate.exitCode }
+  if (lastGateScope && lastGateScope.outOfScope.length > 0) {
+    out.gate_out_of_scope = lastGateScope.outOfScope
+    if (final.cause === 'gate') {
+      out.reason =
+        (out.reason ? out.reason + ' ' : '') +
+        (lastGateScope.inScope.length === 0
+          ? '门禁命中全部落在白名单外既有文件：若属"通过必须改、契约禁止改"的死锁，收窄门禁范围（限定路径参数）或扩 allowed_files 后重派，或用 baseline_gate: true 预检。'
+          : '门禁同时命中白名单内与白名单外内容：白名单外命中请人工甄别（可能为门禁范围过宽）。')
+    }
+  }
   if ((final.verdict === 'FAIL' || final.verdict === 'ESCALATED') && lastTail) out.error_tail = lastTail
+  if (final.error_class) out.error_class = final.error_class
   return out
 }
 
