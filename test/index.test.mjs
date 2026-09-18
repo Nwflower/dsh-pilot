@@ -346,8 +346,8 @@ test('非 git 工作区降级：哈希快照检测白名单文件变化，门禁
     async stat(target) {
       return written ? { path: target.path, size: 9 } : undefined
     },
-    async readBytes(target) {
-      return written ? new TextEncoder().encode('pilot-ok\n') : new Uint8Array()
+    async readText(target) {
+      return written ? 'pilot-ok\n' : ''
     },
   }
   plugin.apply(ctx, {})

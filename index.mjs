@@ -134,10 +134,18 @@ function changedPaths(beforeText, afterText) {
 }
 
 // ---------- 非 git 工作区降级：白名单文件哈希快照（DESIGN §10） ----------
-// 快照 = { rel: hash|null }，null 表示文件不存在。目录条目（以 / 结尾）暂不展开，
-// 仅静态记录（M1 限制，P1 listDir 游走补齐）；目录下新建文件在降级模式检测不到。
+// 快照 = { rel: hash|null }，null 表示文件不存在或读取失败（失败大声记录）。
+// 目录条目（以 / 结尾）暂不展开，仅静态记录（M1 限制，P1 listDir 游走补齐）；
+// 目录下新建文件在降级模式检测不到。
 
-const FALLBACK_MAX_BYTES = 8 * 1024 * 1024
+// 单条目快照：读文本（语义清晰、跨实现稳定）→ UTF-8 字节 → FNV-1a hex。
+async function snapshotEntry(fs, absPath, signal) {
+  const target = await fs.resolve(absPath, { cwd: absPath })
+  const info = await fs.stat(target, signal)
+  if (info === undefined) return null
+  const text = await fs.readText(target, signal)
+  return fnv1aHex(new TextEncoder().encode(text))
+}
 
 function fileEntriesOf(allowedFiles) {
   return allowedFiles.filter((p) => !p.endsWith('/'))
@@ -145,20 +153,14 @@ function fileEntriesOf(allowedFiles) {
 
 async function snapshotWhitelist(ctx, repoRoot, allowedFiles, signal) {
   const fs = ctx.get('fs')
-  if (!fs || typeof fs.resolve !== 'function' || typeof fs.stat !== 'function' || typeof fs.readBytes !== 'function') {
+  if (!fs || typeof fs.resolve !== 'function' || typeof fs.stat !== 'function' || typeof fs.readText !== 'function') {
     throw new Error('fs 服务不可用：非 git 工作区无法做哈希快照')
   }
   const snapshot = {}
+  const root = repoRoot.replace(/[\\/]+$/, '')
   for (const rel of fileEntriesOf(allowedFiles)) {
     try {
-      const target = await fs.resolve(repoRoot.replace(/[\\/]+$/, '') + '/' + rel, { cwd: repoRoot })
-      const info = await fs.stat(target, signal)
-      if (info === undefined) {
-        snapshot[rel] = null
-        continue
-      }
-      const bytes = await fs.readBytes(target, signal, FALLBACK_MAX_BYTES)
-      snapshot[rel] = fnv1aHex(bytes)
+      snapshot[rel] = await snapshotEntry(fs, root + '/' + rel, signal)
     } catch (e) {
       if (signal && signal.aborted) throw e
       // 静默吞掉会让 after 快照误判"无变化"→ 回执被冤判虚报；大声记录
@@ -361,6 +363,7 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
   let lastActual = [] // 最近一轮实际触碰路径（进入 out.files_changed）
   let lastGate = null // 最近一轮门禁结果（进入 out.gate）
   let lastTail = '' // 最近一轮确定性错误尾部（进入 out.error_tail）
+  let lastSnapshotDiag = null // 降级模式诊断：before/after 快照（truth 失败时附入 reason）
   for (;;) {
     attempts += 1
     let run
@@ -409,6 +412,7 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
         afterSnapshot = beforeSnapshot
       }
       actualPaths = snapshotChanged(beforeSnapshot, afterSnapshot)
+      lastSnapshotDiag = { before: beforeSnapshot, after: afterSnapshot }
     }
     const scope = checkScope(actualPaths, contract.allowed_files)
     const truth = receipt ? checkReceipt(receipt, actualPaths) : { truthful: true, claimedNotChanged: [], changedNotClaimed: [] }
@@ -466,6 +470,10 @@ async function executeDispatch(ctx, cfg, activeTasks, args, exec) {
     child: { model: cfg.model || '(provider 默认)' },
   }
   if (final.reason) out.reason = final.reason
+  // 降级模式诊断：truth 失败时把快照带进 reason，主代理/人类可直接看到 before/after 哈希
+  if (lastSnapshotDiag && lastActual.length === 0 && final.reason && final.reason.includes('回执虚报')) {
+    out.reason += '；快照诊断 before=' + JSON.stringify(lastSnapshotDiag.before) + ' after=' + JSON.stringify(lastSnapshotDiag.after)
+  }
   if (lastGate) out.gate = { cmd: lastGate.cmd, exit_code: lastGate.exitCode }
   if ((final.verdict === 'FAIL' || final.verdict === 'ESCALATED') && lastTail) out.error_tail = lastTail
   return out
