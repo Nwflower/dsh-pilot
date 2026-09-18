@@ -2,7 +2,7 @@
 
 **Contract-driven master/subagent dispatch for DeepSeek Harness (DSH).** The master (expensive model) drafts a *contract*, cheap subagents execute it, and the plugin adjudicates **deterministically** — acceptance-command exit codes, git-diff whitelist, receipt cross-check — so the master only reads a compact verdict.
 
-> 状态：**M1 实现中**（DESIGN 定稿见 [DESIGN.md](./DESIGN.md)；开源生态对照与定位见其 §11）。
+> 状态：**M1.5 完成**（DESIGN 定稿见 [DESIGN.md](./DESIGN.md)；实测反馈修正 F21–F24 见其 §5.4/§9.2；开源生态对照与定位见其 §11）。
 > 一句话定位：**agent-teams 给你一支团队，dsh-pilot 给你一份合同。**
 
 ## Why

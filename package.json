@@ -1,7 +1,7 @@
 {
   "name": "dsh-pilot",
   "description": "Contract-driven master/subagent dispatch for DeepSeek Harness (DSH): the master drafts a contract, cheap subagents execute, and the plugin adjudicates deterministically — acceptance-command exit codes, git-diff whitelist, receipt cross-check — so the master only reads a verdict",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "main": "./index.mjs",
   "exports": {

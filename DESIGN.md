@@ -208,7 +208,8 @@ pilot 对主会话上下文的占用必须趋近于零，三档曝光由插件 c
   "allowed_files": ["src/auth.ts", "tests/auth.test.ts"],
   "acceptance_cmd": "pnpm vitest run tests/auth.test.ts",
   "tier": "standard",
-  "max_retries": 2
+  "max_retries": 2,
+  "baseline_gate": false
 }
 ```
 
@@ -221,6 +222,7 @@ pilot 对主会话上下文的占用必须趋近于零，三档曝光由插件 c
 | `acceptance_cmd` | tier=standard 必填；tier=fast 可省略 | 客观验收命令 |
 | `tier` | 默认 `standard` | `fast` / `standard`（见 §6.1） |
 | `max_retries` | 默认 2 | 超限后 verdict=FAIL 上交人类 |
+| `baseline_gate` | 默认 false（可由 config.baselineGate 兜底） | 派发前先自检 acceptance_cmd：基线不绿则不派发直接 BLOCKED，附越界命中分析（F21） |
 
 ### 4.3 回执（Receipt）与裁决（Verdict）
 
@@ -248,11 +250,18 @@ pilot 对主会话上下文的占用必须趋近于零，三档曝光由插件 c
   "files_changed": ["src/auth.ts", "tests/auth.test.ts"],
   "gate": { "cmd": "pnpm vitest run tests/auth.test.ts", "exit_code": 0 },
   "attempts": 1,
-  "child": { "model": "deepseek-v4.1-flash", "tokens": 12345 }
+  "child": { "model": "deepseek-v4.1-flash", "tokens": 12345 },
+  "error_class": "contract",
+  "gate_out_of_scope": ["docs/notes.md"],
+  "workspace_delta": { "files": 3, "insertions": 120, "deletions": 45, "untracked": 1 }
 }
 ```
 
-`verdict ∈ { PASS, FAIL, BLOCKED, ESCALATED }`。FAIL 时附 `error_tail`（截断 stderr，确定性内容）与 `diff_stat`；ESCALATED 表示重试超限，需要人类或主代理改契约。
+`verdict ∈ { PASS, FAIL, BLOCKED, ESCALATED }`。FAIL 时附 `error_tail`（截断 stderr，确定性内容）；ESCALATED 表示重试超限，需要人类或主代理改契约。非 PASS 裁决额外携带三类处置字段（F21/F22/F23）：
+
+- `error_class`：`infrastructure`（修环境原样重派，不要改契约）/ `contract`（改契约或门禁）/ `unknown`（证据不足，按 contract 处理）；
+- `gate_out_of_scope`：门禁输出命中的白名单外既有文件清单——全越界时 reason 附"收窄门禁或扩白名单"的死锁裁决提示；
+- `workspace_delta`：现场增量（文件数/行数/未跟踪数）——失败 attempt 的半成品仍在工作区，派新契约前先验收或回滚。
 
 **真实性核验**（针对 flash 幻觉）：插件自己执行 `git status --porcelain` / `git diff --name-only`，与回执 `files_changed` 交叉比对；回执虚报（声称改了没改/没改声称改了）直接判 FAIL 并把实际 diff 作为反馈。回执里的 `exit_code` 仅作交叉校验，门禁以插件亲自执行的为准。
 
@@ -294,6 +303,15 @@ pilot 对主会话上下文的占用必须趋近于零，三档曝光由插件 c
 | F18 | `settings` 命名空间配置页（模型档位、默认 tier、行数上限等） | `settings.register` |
 | F19 | 与 `agentTeams` / goal 工具集成：长目标自动拆解为契约序列 | 需先探 `agentTeams` 契约 |
 | F20 | worktree 生命周期 UI 与手动接管入口 | 依赖 F15 |
+
+### 5.4 M1.5 — 实测反馈修正（真实派发会话暴露的工程缺口，正式特性化）
+
+| # | 功能 | 载体 |
+| --- | --- | --- |
+| F21 | 门禁-白名单作用域对齐：门禁输出路径提取（`extractGatePaths`，剥行号/URL 排除）→ 存在性甄别 → `gate_out_of_scope` 注记；命中全部越界时耗尽 reason 附死锁裁决提示（**不做硬短路**——门禁输出点名白名单外文件 ≠ 必须改它）；`baseline_gate` 契约字段（或 config.baselineGate）：派发前自检门禁，基线不绿不派发直接 BLOCKED 并附越界命中分析——确定性死锁判定交给它 | pilot-core + Host |
+| F22 | 基础设施失败分类：`determineVerdict` 全分支带 `cause`/`error_class`（infrastructure/contract/unknown）；`classifyInfra` 持久性特征（沙箱 ACL、Win32 错误码、EPERM/EACCES、spawn ENOENT、127/9009）命中即免重试；派发失败归 BLOCKED/infrastructure——"修环境原样重派"与"改契约重派"在 verdict 层分流 | pilot-core + Host |
+| F23 | 现场增量摘要：非 PASS 裁决附 `workspace_delta`（git 模式 shortstat + untracked 计数，降级回落触碰文件数）——BLOCKED 半成品留在工作区，裁决方先验收或回滚再派新契约，防重复劳动 | pilot-core + Host |
+| F24 | playbook 手册内容落地：门禁范围对齐模式、Windows 大小写陷阱（`Select-String` 默认不敏感）、沙箱基础设施处置、error_class 分流、workspace_delta 裁决流程；测试钉死注册内容非空（防"空壳手册"回归） | index.mjs PLAYBOOK |
 
 ---
 
@@ -404,6 +422,7 @@ dsh-pilot/
 | --- | --- | --- |
 | M0 | 本设计文档评审定稿 | 用户确认 ✅ |
 | M1 | P0：pilot-core + index.mjs + 守卫 + 门禁 + persona 段 | ✅ 完成：42/42 自动化测试 + 真实会话验收（见 §9.1） |
+| M1.5 | 实测反馈修正：F21–F24（门禁作用域对齐 / 基础设施分类 / 现场增量摘要 / 手册落地） | ✅ 完成：59/59 自动化测试（见 §9.2） |
 | M2 | 预设打包 + playbook skill + AGENTS 模板 | standingKeyFor 通过，新会话开箱可用 |
 | M3 | P1 按需（tier/batch/worktree/status/成本） | 每个 F 单独 commit 单独验收 |
 | M4+ | P2 远景，按使用痛点优先级插队 | — |
@@ -413,6 +432,10 @@ dsh-pilot/
 经动态插件机制对真实子代理全链路派发验收：**PASS**（before/after 哈希快照差集命中、回执核验一致、门禁 exit 0、attempts=1）。实测发现的六项运行时事实（maxDepth 语义、非 git 降级、sandboxMode、跨 realm 哈希、stat 不可信、verdict 内嵌诊断）已回灌仓库与正文，明细见 git log。
 
 遗留观察：子代理偶发 stopReason=error 且 diagnostic 为空（flash 侧不稳定）——P1 把子代理 stderr/stdout 尾部纳入 diagnostic（F17 数据源）。
+
+### 9.2 M1.5 反馈来源与修正对照（2026-09-19）
+
+真实使用（1 次派发、1 次 BLOCKED、1 次复跑通过，另有一次跨会话沙箱基础设施失败）确认了裁决机制价值，同时暴露四项缺口，全部特性化为 F21–F24：手册空壳（skill 工具只返回标题与资源提示行）→ F24；门禁范围与白名单不一致造成"通过必须改、契约禁止改"死锁 → F21（环内注记 + baseline_gate 确定性预检）；沙箱 ACL 失败被混同为任务失败 → F22（error_class 分流 + 免重试）；BLOCKED 后半成品现场不可见 → F23（workspace_delta）。设计原则：**死锁的硬判定只交给派发前基线自检**，环内只注记不短路——门禁输出点名白名单外文件不等于"必须改它"。
 
 ---
 
