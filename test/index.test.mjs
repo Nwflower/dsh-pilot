@@ -5,7 +5,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import plugin from '../index.mjs'
@@ -176,8 +176,9 @@ test('persona 指针与 playbook skill 注入；exposure=silent 时 persona 不�
   assert.equal(b.skills[0].invocation.modelInvocable, false)
 })
 
-test('契约非法：FAIL 且不派发', async () => {
+test('契约非法：FAIL 且不派发', async (t) => {
   const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
   const { ctx } = mockCtx(root)
   const sub = mockSubagents([])
   ctx.subagents = sub
@@ -188,8 +189,9 @@ test('契约非法：FAIL 且不派发', async () => {
   assert.equal(sub.started, 0)
 })
 
-test('派发全链路 PASS：回执 + 门禁 exit 0 + diff 白名单内', async () => {
+test('派发全链路 PASS：回执 + 门禁 exit 0 + diff 白名单内', async (t) => {
   const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
   const { ctx } = mockCtx(root)
   const sub = mockSubagents([{ result: Promise.resolve(okReceipt(['src/auth.ts'])) }])
   ctx.subagents = sub
@@ -208,8 +210,9 @@ test('派发全链路 PASS：回执 + 门禁 exit 0 + diff 白名单内', async 
   assert.ok(sub.prompts[0].includes('files_changed'))
 })
 
-test('门禁失败触发重试：第二轮带反馈后 PASS，attempts=2', async () => {
+test('门禁失败触发重试：第二轮带反馈后 PASS，attempts=2', async (t) => {
   const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
   const { ctx } = mockCtx(root)
   const sub = mockSubagents([
     { result: Promise.resolve(okReceipt(['src/auth.ts'])) },
@@ -225,8 +228,9 @@ test('门禁失败触发重试：第二轮带反馈后 PASS，attempts=2', async
   assert.ok(sub.prompts[1].includes('exit 1'))
 })
 
-test('子代理 refusal → BLOCKED，不重试', async () => {
+test('子代理 refusal → BLOCKED，不重试', async (t) => {
   const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
   const { ctx } = mockCtx(root)
   const sub = mockSubagents([{ result: Promise.resolve({ stopReason: 'refusal', output: [] }) }])
   ctx.subagents = sub
@@ -237,8 +241,9 @@ test('子代理 refusal → BLOCKED，不重试', async () => {
   assert.equal(sub.started, 1)
 })
 
-test('重试耗尽 → ESCALATED', async () => {
+test('重试耗尽 → ESCALATED', async (t) => {
   const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
   const { ctx } = mockCtx(root)
   const sub = mockSubagents([
     { result: Promise.resolve(okReceipt(['src/auth.ts'])) },
@@ -253,8 +258,9 @@ test('重试耗尽 → ESCALATED', async () => {
   assert.equal(sub.started, 3)
 })
 
-test('provider 不存在：大声 FAIL 且不派发', async () => {
+test('provider 不存在：大声 FAIL 且不派发', async (t) => {
   const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
   const { ctx } = mockCtx(root)
   ctx.subagents = { getProvider: () => undefined, list: () => ['fork'], start: () => {} }
   ctx.shell = mockShell(['', ''], [])
@@ -265,8 +271,9 @@ test('provider 不存在：大声 FAIL 且不派发', async () => {
   assert.ok(out.reason.includes('fork'))
 })
 
-test('回执虚报（files_changed 与实际 diff 不符）→ FAIL + 重试反馈含虚报说明', async () => {
+test('回执虚报（files_changed 与实际 diff 不符）→ FAIL + 重试反馈含虚报说明', async (t) => {
   const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
   const { ctx } = mockCtx(root)
   const sub = mockSubagents([
     { result: Promise.resolve(okReceipt(['src/other.ts'])) }, // 虚报：实际改的是 src/auth.ts
@@ -282,8 +289,9 @@ test('回执虚报（files_changed 与实际 diff 不符）→ FAIL + 重试反�
   assert.ok(sub.prompts[1].includes('src/other.ts'))
 })
 
-test('白名单守卫：子代理写白名单内放行、白名单外拒绝、其他代理不受管', async () => {
+test('白名单守卫：子代理写白名单内放行、白名单外拒绝、其他代理不受管', async (t) => {
   const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
   const { ctx, getGuard } = mockCtx(root)
   let releaseChild
   const gate = new Promise((r) => {
@@ -310,8 +318,9 @@ test('白名单守卫：子代理写白名单内放行、白名单外拒绝、�
   assert.equal(out.verdict, 'PASS')
 })
 
-test('非 git 工作区降级：哈希快照检测白名单文件变化，门禁照常执行', async () => {
+test('非 git 工作区降级：哈希快照检测白名单文件变化，门禁照常执行', async (t) => {
   const root = await tmpRoot()
+  t.after(() => rm(root, { recursive: true, force: true }))
   const { ctx } = mockCtx(root)
   let releaseResult
   const sub = mockSubagents([
