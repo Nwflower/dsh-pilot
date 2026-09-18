@@ -1,0 +1,15 @@
+# dsh-pilot bundle 声明：insert 到宿主组合的 dsh-pilot 插件行。
+# 可选 config（部署时按需覆盖，缺省见 DESIGN §2.3/§6.3）：
+#   - id: dsh-pilot
+#     name: dsh-pilot
+#     config:
+#       provider: spawn              # 子代理 provider 名（subagents.list() 可查）
+#       model: deepseek-v4.1-flash   # 钉死子代理模型；缺省用 provider 默认
+#       exposure: pointer            # pointer=一行 persona 指针；silent=上下文零占用（skill 仅用户显式调用）
+#       guard: true                  # false 关闭白名单守卫
+#       maxRetries: 2                # 契约缺省重试上限（0..5，契约可覆盖）
+#       gateTimeoutMs: 300000        # 门禁/快照命令超时（默认 5min）
+#       feedbackMaxChars: 2000       # 重试反馈截断长度
+- insert:
+    - id: dsh-pilot
+      name: dsh-pilot

@@ -1,0 +1,50 @@
+{
+  "name": "dsh-pilot",
+  "description": "Contract-driven master/subagent dispatch for DeepSeek Harness (DSH): the master drafts a contract, cheap subagents execute, and the plugin adjudicates deterministically — acceptance-command exit codes, git-diff whitelist, receipt cross-check — so the master only reads a verdict",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./pilot-core.mjs": "./pilot-core.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "pilot-core.mjs",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "host-plugin",
+    "subagent",
+    "orchestration",
+    "contract-driven",
+    "multi-agent",
+    "verification",
+    "cost-control"
+  ],
+  "author": "Nwflower <1679659@qq.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nwflower/dsh-pilot.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "prepublishOnly": "npm test && git diff --quiet && git diff --cached --quiet && npm pack --dry-run"
+  },
+  "license": "MIT"
+}
