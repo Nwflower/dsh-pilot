@@ -343,7 +343,10 @@ function toolParameters() {
 const VERDICT_OUTPUT_SCHEMA = {
   type: 'object',
   properties: {
-    verdict: { enum: ['PASS', 'FAIL', 'BLOCKED', 'ESCALATED'] },
+    // 静态 tools.register 走 dsh-tools 的 JSON Schema 子集校验（assertSupportedJsonSchema）：
+    // 约束关键字（enum/const/properties/items…）所在节点必须显式声明 type 或 oneOf——
+    // enum 缺 type 会让整个插件树装载失败（M1 挂载崩溃根因，见 test/schema-subset.test.mjs）
+    verdict: { type: 'string', enum: ['PASS', 'FAIL', 'BLOCKED', 'ESCALATED'] },
     reason: { type: 'string' },
     files_changed: { type: 'array', items: { type: 'string' } },
     gate: {
