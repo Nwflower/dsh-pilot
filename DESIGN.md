@@ -276,7 +276,7 @@ pilot 对主会话上下文的占用必须趋近于零，三档曝光由插件 c
 | F1 | `pilot_dispatch` 契约工具：schema 强校验、组装子代理 prompt、`subagents.start` 派发、等待 result | Host 插件 |
 | F2 | 结构化回执：`outputSchema` 注入；provider 不支持时降级为"契约附回执模板 + 插件 JSON 提取校验" | Host 插件 |
 | F3 | 确定性门禁：插件用 `shell` 亲自执行 `acceptance_cmd`，取真实 exit code | Host 插件 |
-| F4 | 白名单守卫：`tools.guard` 按 `exec.agent.id` 匹配活动任务，拒绝对白名单外路径的 write/edit；bash/pwsh 走尽力解析（fail-open，同 file-claim 边界） | Host 插件 |
+| F4 | 白名单守卫：`tools.guard` 按 `exec.agent.id` 匹配活动任务，拒绝对白名单外路径的 write/edit；bash/pwsh 走尽力解析（fail-open，同 file-claim 边界）。**返回契约（实测 dsh-tools）：`undefined`=放行，任何非 undefined 值（含 `null`）都会被当成拒绝理由**——放行路径必须 return undefined（M1.6 全工具返回 null 根因） | Host 插件 |
 | F5 | diff 范围核验 + 回执真实性核验 | Host 插件 |
 | F6 | 失败重试环：FAIL 且 retryable 时以确定性反馈（stderr 尾部 + 越界清单 + 虚报说明）**重派新子代理**，≤max_retries；耗尽 → ESCALATED（实现注记：M1 不用 `startContinuable` steer 同一子代理——实测 `ContinuableStartSpec.request` 会剥除 `outputSchema`，steer 模式拿不到结构化回执硬保证；同子代理 steer 列为 P1，届时回执走自由文本提取降级） | Host 插件 |
 | F7 | 极简 persona 段（`systemPrompt.section` 自注册，**一行 <80 token**）："改代码走 pilot_dispatch；复杂任务先载入 pilot-playbook"。`exposure: 'silent'` 时整段不注入（§2.3） | Host 插件 |
@@ -423,6 +423,7 @@ dsh-pilot/
 | M0 | 本设计文档评审定稿 | 用户确认 ✅ |
 | M1 | P0：pilot-core + index.mjs + 守卫 + 门禁 + persona 段 | ✅ 完成：42/42 自动化测试 + 真实会话验收（见 §9.1） |
 | M1.5 | 实测反馈修正：F21–F24（门禁作用域对齐 / 基础设施分类 / 现场增量摘要 / 手册落地） | ✅ 完成：59/59 自动化测试（见 §9.2） |
+| M1.6 | 静态挂载修复：两起仅静态组合路径暴露的根因——输出 schema 未过 dsh-tools 子集校验（enum 缺 type 致启动崩溃）、守卫返回契约用错（null 被当作拒绝理由致全工具调用返回 null） | ✅ 完成：62/62 自动化测试 + 真实重启验证（见 §9.3） |
 | M2 | 预设打包 + playbook skill + AGENTS 模板 | standingKeyFor 通过，新会话开箱可用 |
 | M3 | P1 按需（tier/batch/worktree/status/成本） | 每个 F 单独 commit 单独验收 |
 | M4+ | P2 远景，按使用痛点优先级插队 | — |
@@ -436,6 +437,15 @@ dsh-pilot/
 ### 9.2 M1.5 反馈来源与修正对照（2026-09-19）
 
 真实使用（1 次派发、1 次 BLOCKED、1 次复跑通过，另有一次跨会话沙箱基础设施失败）确认了裁决机制价值，同时暴露四项缺口，全部特性化为 F21–F24：手册空壳（skill 工具只返回标题与资源提示行）→ F24；门禁范围与白名单不一致造成"通过必须改、契约禁止改"死锁 → F21（环内注记 + baseline_gate 确定性预检）；沙箱 ACL 失败被混同为任务失败 → F22（error_class 分流 + 免重试）；BLOCKED 后半成品现场不可见 → F23（workspace_delta）。设计原则：**死锁的硬判定只交给派发前基线自检**，环内只注记不短路——门禁输出点名白名单外文件不等于"必须改它"。
+
+### 9.3 M1.6 静态挂载修复记录（2026-09-19）
+
+以本地 link 挂载到 web profile 后两次真实重启暴露两起**仅静态组合路径可见**的根因（动态插件容器与 mock 测试都无法拦截）：
+
+1. **启动崩溃**：输出 schema `verdict` 节点 enum 缺 `type`，静态 `tools.register` 走 dsh-tools `assertSupportedJsonSchema` 子集校验直接抛错（`schema.properties.verdict.enum requires type or oneOf`），apply 失败 → 整个插件树装载失败。修复 + 新增 `test/schema-subset.test.mjs`（镜像真实校验器子集规则，含负向自检）。
+2. **全工具返回 null**：`tools.guard` 的返回契约是 `undefined`=放行、字符串=拒绝，而守卫放行路径返回了 `null`——`guardReason` 判定 `null !== void 0`，把每次工具调用（含无派发时）都当成拒绝，模型侧所有工具（含 pwsh）表现为返回 null。修复：全部放行路径 `return undefined`；测试钉死契约并加负向断言。
+
+教训：宿主扩展点的**返回契约**必须对照运行时源码核实（`guardReason` / `assertSupportedJsonSchema`），mock 只能验形状、验不了真实语义；分布形态（静态组合）才是这些契约的裁决现场。
 
 ---
 
