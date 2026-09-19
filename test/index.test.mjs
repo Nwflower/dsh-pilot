@@ -457,7 +457,7 @@ test('baseline_gate：基线绿 → 正常派发不受影响（M1.5）', async (
   assert.equal(sub.started, 1)
 })
 
-test('白名单守卫：子代理写白名单内放行、白名单外拒绝、其他代理不受管', async (t) => {
+test('白名单守卫：守卫返回契约——放行必须 undefined（null 会被宿主当作拒绝）、拒绝返回字符串（M1.6）', async (t) => {
   const root = await tmpRoot()
   t.after(() => rm(root, { recursive: true, force: true }))
   const { ctx, getGuard } = mockCtx(root)
@@ -477,10 +477,22 @@ test('白名单守卫：子代理写白名单内放行、白名单外拒绝、�
   await new Promise((r) => setTimeout(r, 20))
   const guard = getGuard()
   assert.equal(typeof guard, 'function')
-  assert.equal(guard({ name: 'write', arguments: { file_path: join(root, 'src', 'auth.ts') }, agent: { id: 'child-1' } }), null)
+  // 放行路径必须 undefined：非白名单工具、其他代理、白名单内写入
+  assert.equal(guard({ name: 'read', arguments: {}, agent: { id: 'child-1' } }), undefined)
+  assert.equal(guard({ name: 'write', arguments: { file_path: join(root, 'src', 'evil.ts') }, agent: { id: 'other-session' } }), undefined)
+  assert.equal(guard({ name: 'write', arguments: { file_path: join(root, 'src', 'auth.ts') }, agent: { id: 'child-1' } }), undefined)
+  // 放行绝不是 null：宿主 guardReason 视 null 为拒绝理由（M1.6 全工具返回 null 根因）
+  assert.notEqual(guard({ name: 'write', arguments: { file_path: join(root, 'src', 'auth.ts') }, agent: { id: 'child-1' } }), null)
+  // 拒绝返回字符串
   assert.ok(guard({ name: 'write', arguments: { file_path: join(root, 'src', 'evil.ts') }, agent: { id: 'child-1' } }).includes('白名单'))
-  assert.equal(guard({ name: 'write', arguments: { file_path: join(root, 'src', 'evil.ts') }, agent: { id: 'other-session' } }), null)
   assert.ok(guard({ name: 'bash', arguments: { command: `echo x > ${join(root, 'evil.txt')}` }, agent: { id: 'child-1' } }).includes('白名单'))
+  // guard: false 时全放行（undefined）
+  const { ctx: ctxF, getGuard: getGuardF } = mockCtx(root)
+  ctxF.subagents = sub
+  ctxF.shell = mockShell(['', ''], [0])
+  plugin.apply(ctxF, { guard: false })
+  const guardF = getGuardF()
+  assert.equal(guardF({ name: 'write', arguments: { file_path: join(root, 'evil.txt') }, agent: { id: 'child-1' } }), undefined)
   releaseChild()
   const out = await pending
   assert.equal(out.verdict, 'PASS')

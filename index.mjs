@@ -214,12 +214,15 @@ function toRelWithin(repoRoot, target) {
   return { rel: normalizeRelPath(target) }
 }
 
+// tools.guard 返回契约（实测自 dsh-tools guardReason，M1.6 崩溃根因）：
+// undefined = 放行；任何非 undefined 值（包括 null！）都被当作拒绝理由并拒绝整个工具调用。
+// 全部放行路径必须 return undefined——null 会让"所有工具调用"全部被拒（曾导致全工具返回 null）。
 function guardDenyReason(cfg, activeTasks, exec) {
-  if (cfg.guard === false) return null
+  if (cfg.guard === false) return undefined
   const name = exec && exec.name
-  if (!name || !WRITE_TOOLS.has(name)) return null
+  if (!name || !WRITE_TOOLS.has(name)) return undefined
   const task = exec.agent && activeTasks.get(exec.agent.id)
-  if (!task) return null // 非本插件派发的代理：不管
+  if (!task) return undefined // 非本插件派发的代理：不管（fail-open）
   const args = exec.arguments || {}
   let targets = []
   if (name === 'write' || name === 'edit') {
@@ -240,7 +243,7 @@ function guardDenyReason(cfg, activeTasks, exec) {
       )
     }
   }
-  return null
+  return undefined
 }
 
 // ---------- 门禁越界命中分类（M1.5：门禁范围 × 白名单对齐） ----------
@@ -735,8 +738,8 @@ export default {
         try {
           return guardDenyReason(cfg, activeTasks, exec)
         } catch {
-          // 守卫自身出错 → 放行，不阻断宿主工具面
-          return null
+          // 守卫自身出错 → 放行，不阻断宿主工具面；必须 undefined（null 会被当作拒绝）
+          return undefined
         }
       }),
     )
